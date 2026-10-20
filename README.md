@@ -21,11 +21,13 @@ sudo apt install -y python3 python3-pip python3-venv mpv \
 ```bash
 cd /path/to/this/repo
 git pull
-python3 -m venv .venv
+# --system-site-packages so PyGObject (apt python3-gi) is visible for MPRIS
+python3 -m venv --system-site-packages .venv
 source .venv/bin/activate
 pip install -e .
 # or, if already installed:
 # pip install -e . --force-reinstall --no-deps
+melodify doctor   # verifies OS media (MPRIS) wiring
 ```
 
 ## Configure
@@ -129,19 +131,25 @@ Right pane updates from mpv IPC ~2×/sec while a track is playing.
 
 ### OS media controls (MPRIS)
 
-On a normal Ubuntu desktop session, Melodify exports **MPRIS2** on D-Bus as `org.mpris.MediaPlayer2.Melodify`. That means:
+Melodify already speaks the Linux media APIs: it publishes **MPRIS2** on the session D-Bus as `org.mpris.MediaPlayer2.Melodify` and installs `~/.local/share/applications/melodify.desktop`.
 
-- GNOME / KDE media popups show the current track (title, artist, art)
-- Keyboard media keys and `playerctl` can pause / play / next / previous
-- Seeking and volume from the OS media UI also work when `mpv` is the backend
+That hooks into:
+
+- GNOME / KDE media popups (title, artist, artwork)
+- Keyboard media keys (play/pause, next, previous)
+- `playerctl` and other MPRIS clients (seek + volume when using `mpv`)
 
 ```bash
+# while Melodify is running on your desktop:
 playerctl -p Melodify status
 playerctl -p Melodify play-pause
 playerctl -p Melodify next
+
+# offline check (no Melodify account needed):
+melodify doctor
 ```
 
-Set `MELODIFY_MPRIS=0` to disable. Headless environments without a session bus simply skip MPRIS.
+Needs: `python3-gi`, `gir1.2-glib-2.0`, a real desktop session bus, and `mpris-server` (pulled in by `pip install -e .`). Use a venv with `--system-site-packages` so `gi` imports. Set `MELODIFY_MPRIS=0` to disable.
 
 ### Long lists / pagination
 

@@ -992,7 +992,16 @@ class MelodifyApp(App[None]):
         )
 
         if self.mpris.start():
-            self.notify("OS media controls (MPRIS) enabled.", timeout=3)
+            self.notify(
+                "OS media controls on — GNOME/KDE keys & playerctl (-p Melodify).",
+                timeout=4,
+            )
+        elif self.mpris.last_error:
+            self.notify(
+                f"OS media controls off: {self.mpris.last_error}",
+                severity="warning",
+                timeout=8,
+            )
 
     def _mpris_pause(self) -> None:
         try:

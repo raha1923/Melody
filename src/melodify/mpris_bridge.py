@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from .models import Track as MelodifyTrack
@@ -15,6 +17,47 @@ log = logging.getLogger(__name__)
 
 # MPRIS positions / lengths are microseconds.
 _US = 1_000_000
+
+# Basename without ".desktop" — what MPRIS DesktopEntry expects.
+_DESKTOP_ID = "melodify"
+
+_DESKTOP_FILE = """[Desktop Entry]
+Type=Application
+Name=Melodify
+GenericName=Music Player
+Comment=Terminal Melodify music client
+Exec=melodify
+TryExec=melodify
+Icon=audio-x-generic
+Terminal=true
+Categories=AudioVideo;Audio;Player;Music;
+Keywords=music;melodify;player;
+StartupNotify=false
+"""
+
+
+def ensure_desktop_entry() -> Path | None:
+    """Install ~/.local/share/applications/melodify.desktop for GNOME/KDE media UIs."""
+    try:
+        apps = Path.home() / ".local" / "share" / "applications"
+        apps.mkdir(parents=True, exist_ok=True)
+        path = apps / f"{_DESKTOP_ID}.desktop"
+        if not path.exists() or path.read_text(encoding="utf-8") != _DESKTOP_FILE:
+            path.write_text(_DESKTOP_FILE, encoding="utf-8")
+        # Refresh desktop database when available (best-effort).
+        updater = shutil.which("update-desktop-database")
+        if updater:
+            import subprocess
+
+            subprocess.Popen(
+                [updater, str(apps)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        return path
+    except OSError as exc:
+        log.debug("Could not install desktop entry: %s", exc)
+        return None
 
 
 @dataclass
@@ -48,6 +91,7 @@ class MelodifyMpris:
         self._actions: MprisActions | None = None
         self._last_status = ""
         self._last_track_id: int | None = None
+        self.last_error: str | None = None
 
     @property
     def enabled(self) -> bool:
@@ -69,18 +113,43 @@ class MelodifyMpris:
 
     def start(self) -> bool:
         """Publish on the session bus. Returns False if unavailable (headless, no D-Bus)."""
+        self.last_error = None
         if os.environ.get("MELODIFY_MPRIS", "1").strip() in {"0", "false", "no", "off"}:
+            self.last_error = "Disabled via MELODIFY_MPRIS=0"
             log.info("MPRIS disabled via MELODIFY_MPRIS")
             return False
         if self._enabled:
             return True
+
+        ensure_desktop_entry()
+
+        try:
+            import gi  # noqa: F401 — required by mpris_server / PyGObject
+        except ImportError as exc:
+            self.last_error = (
+                "PyGObject (gi) missing — on Ubuntu: sudo apt install python3-gi gir1.2-glib-2.0 "
+                "(use a venv with --system-site-packages)"
+            )
+            log.info("MPRIS unavailable (PyGObject): %s", exc)
+            return False
+
         try:
             from mpris_server.adapters import MprisAdapter
             from mpris_server.base import PlayState
             from mpris_server.events import EventAdapter
             from mpris_server.server import Server
         except ImportError as exc:
+            self.last_error = f"mpris-server not installed ({exc}). pip install mpris-server"
             log.info("MPRIS unavailable (install mpris-server): %s", exc)
+            return False
+
+        if not os.environ.get("DBUS_SESSION_BUS_ADDRESS") and not Path(
+            f"/run/user/{os.getuid()}/bus"
+        ).exists():
+            self.last_error = (
+                "No D-Bus session bus (run Melodify inside your desktop login session)"
+            )
+            log.info("MPRIS skipped: no D-Bus session bus")
             return False
 
         bridge = self
@@ -90,7 +159,7 @@ class MelodifyMpris:
                 super().__init__("Melodify")
 
             def get_desktop_entry(self) -> str:
-                return ""
+                return _DESKTOP_ID
 
             def can_quit(self) -> bool:
                 return False
@@ -115,20 +184,34 @@ class MelodifyMpris:
 
             def can_go_next(self) -> bool:
                 q = bridge._queue
-                return bool(q and q.peek_next() is not None)
+                if q is None:
+                    return False
+                if q.peek_next() is not None:
+                    return True
+                pager = getattr(q, "pager", None)
+                return bool(pager is not None and getattr(pager, "has_more", False))
 
             def can_go_previous(self) -> bool:
                 q = bridge._queue
                 return bool(q and q.peek_prev() is not None)
 
             def can_pause(self) -> bool:
-                return bool(bridge._player and bridge._player.supports_ipc)
+                # PlayPause media keys require CanPause=true even when stopped.
+                player = bridge._player
+                if player is None:
+                    return False
+                if player.supports_ipc:
+                    return True
+                return player.is_alive
 
             def can_play(self) -> bool:
                 return True
 
             def can_seek(self) -> bool:
-                return bool(bridge._player and bridge._player.supports_ipc)
+                player = bridge._player
+                if player is None:
+                    return False
+                return player.supports_ipc and player.is_alive
 
             def get_playstate(self) -> PlayState:
                 player = bridge._player
@@ -199,7 +282,7 @@ class MelodifyMpris:
                 bridge._run(lambda a: a.resume())
 
             def play(self) -> None:
-                # PlayPause semantics when stopped → resume/replay current.
+                # PlayPause → Play when stopped: resume or replay current track.
                 bridge._run(lambda a: a.resume())
 
             def stop(self) -> None:
@@ -275,6 +358,7 @@ class MelodifyMpris:
         try:
             server.loop(background=True)
         except Exception as exc:  # noqa: BLE001 — no session bus / headless
+            self.last_error = f"Could not publish on D-Bus: {exc}"
             log.info("MPRIS not started (no D-Bus session?): %s", exc)
             try:
                 server.quit()
@@ -287,9 +371,104 @@ class MelodifyMpris:
             self._server = server
             self._events = events
             self._enabled = True
+        self.last_error = None
         log.info("MPRIS published as org.mpris.MediaPlayer2.Melodify")
         self.notify(all_props=True)
         return True
+
+
+def diagnose_os_media() -> list[tuple[str, bool, str]]:
+    """Return (check, ok, detail) rows for `melodify doctor`."""
+    rows: list[tuple[str, bool, str]] = []
+
+    mpris_env = os.environ.get("MELODIFY_MPRIS", "1").strip().lower()
+    enabled = mpris_env not in {"0", "false", "no", "off"}
+    rows.append(
+        (
+            "MELODIFY_MPRIS",
+            enabled,
+            "enabled" if enabled else f"disabled ({mpris_env!r})",
+        )
+    )
+
+    try:
+        import mpris_server  # noqa: F401
+
+        rows.append(("mpris-server", True, "import ok"))
+    except ImportError as exc:
+        rows.append(("mpris-server", False, f"missing — pip install mpris-server ({exc})"))
+
+    try:
+        import gi
+
+        gi.require_version("Gio", "2.0")
+        from gi.repository import Gio  # noqa: F401
+
+        rows.append(("PyGObject (gi)", True, "import ok"))
+    except Exception as exc:  # noqa: BLE001
+        rows.append(
+            (
+                "PyGObject (gi)",
+                False,
+                f"missing — sudo apt install python3-gi gir1.2-glib-2.0 ({exc})",
+            )
+        )
+
+    bus = os.environ.get("DBUS_SESSION_BUS_ADDRESS")
+    user_bus = Path(f"/run/user/{os.getuid()}/bus")
+    if bus:
+        rows.append(("D-Bus session", True, bus))
+    elif user_bus.exists():
+        rows.append(("D-Bus session", True, str(user_bus)))
+    else:
+        rows.append(
+            (
+                "D-Bus session",
+                False,
+                "not found — run inside a desktop login (GNOME/KDE), not a bare SSH)",
+            )
+        )
+
+    desktop = ensure_desktop_entry()
+    rows.append(
+        (
+            "Desktop entry",
+            desktop is not None and desktop.exists(),
+            str(desktop) if desktop else "could not write ~/.local/share/applications/melodify.desktop",
+        )
+    )
+
+    playerctl = shutil.which("playerctl")
+    rows.append(
+        (
+            "playerctl",
+            playerctl is not None,
+            playerctl or "optional — sudo apt install playerctl",
+        )
+    )
+
+    mpv = shutil.which("mpv")
+    rows.append(("mpv", mpv is not None, mpv or "sudo apt install mpv"))
+
+    # Live publish probe (only when deps look OK).
+    if enabled and all(ok for name, ok, _ in rows if name in {"mpris-server", "PyGObject (gi)", "D-Bus session"}):
+        probe = MelodifyMpris()
+        ok = probe.start()
+        if ok:
+            rows.append(
+                (
+                    "MPRIS publish",
+                    True,
+                    "org.mpris.MediaPlayer2.Melodify — try: playerctl -p Melodify status",
+                )
+            )
+            probe.stop()
+        else:
+            rows.append(("MPRIS publish", False, probe.last_error or "failed"))
+    else:
+        rows.append(("MPRIS publish", False, "skipped (fix earlier failures first)"))
+
+    return rows
 
     def stop(self) -> None:
         with self._lock:

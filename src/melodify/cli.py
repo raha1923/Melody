@@ -92,7 +92,17 @@ def main(argv: list[str] | None = None) -> int:
         help="Stream quality: 320, 160, or 96 (default from env)",
     )
 
+    sub.add_parser(
+        "doctor",
+        help="Check OS media integration (MPRIS / D-Bus / mpv) without needing .env.",
+    )
+
     args = parser.parse_args(argv)
+    command = args.command or "tui"
+
+    if command == "doctor":
+        return _run_doctor()
+
     settings = load_settings(args.env_file)
     missing = settings.missing()
     if missing:
@@ -103,8 +113,6 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 2
-
-    command = args.command or "tui"
     progress = ProgressStore()
     recent = RecentStore()
 
@@ -311,7 +319,9 @@ def _stream_queue(
         ),
     )
     if mpris.start():
-        print("OS media controls (MPRIS) enabled.", flush=True)
+        print("OS media controls (MPRIS) enabled — playerctl -p Melodify …", flush=True)
+    elif mpris.last_error:
+        print(f"OS media controls off: {mpris.last_error}", flush=True)
 
     first = queue.current
     if first is None:
@@ -336,6 +346,38 @@ def _stream_queue(
         if pos is None or (duration and pos >= max(duration - 3, 1)):
             progress.clear_position(current.id)
     return 0
+
+
+def _run_doctor() -> int:
+    from .mpris_bridge import diagnose_os_media
+
+    print(f"Melodify {__version__} — OS media / environment check\n")
+    rows = diagnose_os_media()
+    width = max(len(name) for name, _, _ in rows)
+    failed = 0
+    for name, ok, detail in rows:
+        mark = "OK " if ok else "NO "
+        print(f"  [{mark}] {name:<{width}}  {detail}")
+        if not ok and name != "playerctl":
+            # playerctl is optional helper; other failures matter for MPRIS.
+            if name in {
+                "MELODIFY_MPRIS",
+                "mpris-server",
+                "PyGObject (gi)",
+                "D-Bus session",
+                "MPRIS publish",
+                "mpv",
+            }:
+                failed += 1
+    print(
+        "\nOn your Ubuntu desktop, with Melodify playing:\n"
+        "  playerctl -p Melodify status\n"
+        "  playerctl -p Melodify play-pause\n"
+        "  playerctl -p Melodify next\n"
+        "\nTip: create the venv with system GI bindings:\n"
+        "  python3 -m venv --system-site-packages .venv\n"
+    )
+    return 1 if failed else 0
 
 
 def _print_search(results) -> None:
