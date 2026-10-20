@@ -25,6 +25,7 @@ from .config import Settings
 from .models import Album, Artist, Track
 from .player import PlayerError, StreamPlayer
 from .progress import ProgressStore
+from .queue import PlayQueue
 
 
 def _status_line(text: str, *, tone: str = "dim") -> Static:
@@ -32,8 +33,16 @@ def _status_line(text: str, *, tone: str = "dim") -> Static:
 
 
 class TrackSelected(Message):
-    def __init__(self, track: Track) -> None:
+    def __init__(
+        self,
+        track: Track,
+        *,
+        queue: list[Track] | None = None,
+        source: str = "",
+    ) -> None:
         self.track = track
+        self.queue = list(queue or [track])
+        self.source = source
         super().__init__()
 
 
@@ -52,9 +61,10 @@ class AlbumSelected(Message):
 class SelectableList(ListView):
     """ListView that posts domain selection messages."""
 
-    def __init__(self, kind: str, **kwargs) -> None:
+    def __init__(self, kind: str, *, source: str = "", **kwargs) -> None:
         super().__init__(**kwargs)
         self.kind = kind
+        self.source = source
         self._items: list[Artist | Album | Track] = []
 
     def set_items(self, items: list[Artist | Album | Track]) -> None:
@@ -66,13 +76,22 @@ class SelectableList(ListView):
         for item in items:
             self.append(ListItem(Label(item.label())))
 
+    def track_items(self) -> list[Track]:
+        return [item for item in self._items if isinstance(item, Track)]
+
     def on_list_view_selected(self, event: ListView.Selected) -> None:
         index = event.list_view.index
         if index is None or index < 0 or index >= len(self._items):
             return
         item = self._items[index]
         if self.kind == "track" and isinstance(item, Track):
-            self.post_message(TrackSelected(item))
+            self.post_message(
+                TrackSelected(
+                    item,
+                    queue=self.track_items(),
+                    source=self.source or self.id or "list",
+                )
+            )
         elif self.kind == "artist" and isinstance(item, Artist):
             self.post_message(ArtistSelected(item))
         elif self.kind == "album" and isinstance(item, Album):
@@ -107,13 +126,13 @@ class SearchScreen(Screen):
             yield LoadingIndicator(id="loading")
             with TabbedContent(id="results-tabs"):
                 with TabPane("Songs", id="tab-tracks"):
-                    yield SelectableList("track", id="track-list")
+                    yield SelectableList("track", id="track-list", source="search")
                 with TabPane("Artists", id="tab-artists"):
-                    yield SelectableList("artist", id="artist-list")
+                    yield SelectableList("artist", id="artist-list", source="artists")
                 with TabPane("Albums", id="tab-albums"):
-                    yield SelectableList("album", id="album-list")
+                    yield SelectableList("album", id="album-list", source="albums")
                 with TabPane("Last played", id="tab-last"):
-                    yield SelectableList("track", id="last-list")
+                    yield SelectableList("track", id="last-list", source="last")
         yield Footer()
 
     def on_mount(self) -> None:
@@ -249,9 +268,13 @@ class ArtistScreen(Screen):
                 yield Button("Refresh", id="btn-refresh", variant="primary")
             with TabbedContent():
                 with TabPane("Songs", id="tab-artist-tracks"):
-                    yield SelectableList("track", id="artist-track-list")
+                    yield SelectableList(
+                        "track", id="artist-track-list", source="artist"
+                    )
                 with TabPane("Albums", id="tab-artist-albums"):
-                    yield SelectableList("album", id="artist-album-list")
+                    yield SelectableList(
+                        "album", id="artist-album-list", source="artist-albums"
+                    )
         yield Footer()
 
     def on_mount(self) -> None:
@@ -311,7 +334,7 @@ class AlbumScreen(Screen):
             with Horizontal(id="detail-actions"):
                 yield Button("Back", id="btn-back", variant="default")
                 yield Button("Refresh", id="btn-refresh", variant="primary")
-            yield SelectableList("track", id="album-track-list")
+            yield SelectableList("track", id="album-track-list", source="album")
         yield Footer()
 
     def on_mount(self) -> None:
@@ -424,6 +447,10 @@ class MelodifyApp(App[None]):
         Binding("p", "play_highlighted", "Play"),
         Binding("c", "continue_listening", "Continue"),
         Binding("space", "toggle_pause", "Pause"),
+        Binding("n", "play_next", "Next"),
+        Binding("b", "play_prev", "Prev"),
+        Binding(">", "play_next", "Next", show=False),
+        Binding("<", "play_prev", "Prev", show=False),
         Binding("s", "stop_playback", "Stop"),
         Binding("left", "seek_back", "Seek -5s"),
         Binding("right", "seek_forward", "Seek +5s"),
@@ -441,10 +468,14 @@ class MelodifyApp(App[None]):
         self.client = MelodifyClient(settings)
         self.player = StreamPlayer(preferred=settings.player)
         self.progress = ProgressStore()
+        self.queue = PlayQueue()
         self._last_track: Track | None = None
+        self._expect_playback = False
+        self._auto_advance = True
 
     def on_mount(self) -> None:
         self.push_screen(SearchScreen())
+        self.set_interval(0.5, self._watch_playback_end)
         missing = self.settings.missing()
         if missing:
             self.notify(
@@ -454,6 +485,7 @@ class MelodifyApp(App[None]):
             )
 
     def on_unmount(self) -> None:
+        self._expect_playback = False
         self.player.stop()
         self.client.close()
 
@@ -462,6 +494,7 @@ class MelodifyApp(App[None]):
             self.pop_screen()
 
     def action_stop_playback(self) -> None:
+        self._expect_playback = False
         position = self.player.stop()
         if self._last_track is not None and position is not None:
             self.progress.save_position(
@@ -471,6 +504,41 @@ class MelodifyApp(App[None]):
                 mark_last=True,
             )
         self.notify("Playback stopped.", timeout=2)
+
+    def action_play_next(self) -> None:
+        self._expect_playback = False
+        track = self.queue.advance()
+        if track is None:
+            self.notify("End of queue — no next track.", severity="information", timeout=2)
+            return
+        self._play_track(track, start_seconds=0, from_queue=True)
+
+    def action_play_prev(self) -> None:
+        self._expect_playback = False
+        track = self.queue.retreat()
+        if track is None:
+            self.notify("Start of queue — no previous track.", severity="information", timeout=2)
+            return
+        self._play_track(track, start_seconds=0, from_queue=True)
+
+    def _watch_playback_end(self) -> None:
+        """Auto-advance when mpv exits after a natural end (no wrap)."""
+        if not self._expect_playback or not self._auto_advance:
+            return
+        if self.player.is_alive:
+            return
+        # Player process ended while we still expected playback.
+        self._expect_playback = False
+        if self._last_track is not None:
+            self.progress.clear_position(self._last_track.id)
+        nxt = self.queue.peek_next()
+        if nxt is None:
+            self.notify("Queue finished.", timeout=2)
+            return
+        track = self.queue.advance()
+        if track is not None:
+            self.notify(f"Next: {track.title}", timeout=2)
+            self._play_track(track, start_seconds=0, from_queue=True)
 
     def action_toggle_pause(self) -> None:
         try:
@@ -542,17 +610,20 @@ class MelodifyApp(App[None]):
         self.run_worker(self._continue_worker(), exclusive=True, thread=True)
 
     def action_play_highlighted(self) -> None:
-        track = self._highlighted_track()
-        if track is None:
+        context = self._highlighted_track_context()
+        if context is None:
             if self._last_track is not None:
-                self._play_track(self._last_track)
+                self._play_track(self._last_track, from_queue=True)
             else:
                 self.notify("Highlight a song first.", severity="warning")
             return
-        self._play_track(track)
+        track, queue_tracks, source = context
+        self.queue.load(queue_tracks, start=track, source=source)
+        self._play_track(track, from_queue=True)
 
     def on_track_selected(self, event: TrackSelected) -> None:
-        self._play_track(event.track)
+        self.queue.load(event.queue, start=event.track, source=event.source or "list")
+        self._play_track(event.track, from_queue=True)
 
     def on_artist_selected(self, event: ArtistSelected) -> None:
         self.push_screen(ArtistScreen(event.artist))
@@ -560,7 +631,9 @@ class MelodifyApp(App[None]):
     def on_album_selected(self, event: AlbumSelected) -> None:
         self.push_screen(AlbumScreen(event.album))
 
-    def _highlighted_track(self) -> Track | None:
+    def _highlighted_track_context(
+        self,
+    ) -> tuple[Track, list[Track], str] | None:
         screen = self.screen
         for list_id in (
             "#track-list",
@@ -579,10 +652,22 @@ class MelodifyApp(App[None]):
                 continue
             item = widget._items[index]
             if isinstance(item, Track):
-                return item
+                return item, widget.track_items(), widget.source or list_id
         return None
 
-    def _play_track(self, track: Track, *, start_seconds: float | None = None) -> None:
+    def _highlighted_track(self) -> Track | None:
+        context = self._highlighted_track_context()
+        return context[0] if context else None
+
+    def _play_track(
+        self,
+        track: Track,
+        *,
+        start_seconds: float | None = None,
+        from_queue: bool = False,
+    ) -> None:
+        if not from_queue and self.queue.current is None:
+            self.queue.load([track], start=track, source="single")
         self._last_track = track
         self.run_worker(
             self._play_worker(track, start_seconds=start_seconds),
@@ -612,7 +697,13 @@ class MelodifyApp(App[None]):
                 timeout=5,
             )
             return
-        track = history.tracks[0]
+        track = self.queue.load(
+            history.tracks,
+            start=history.tracks[0],
+            source=history.describe_source(),
+        )
+        if track is None:
+            return
         self._last_track = track
         start = self.progress.resolve_start_seconds(
             track.id,
@@ -645,12 +736,15 @@ class MelodifyApp(App[None]):
             resume_note = f" @ {mins}:{secs:02d}"
         prefix = "Continuing" if history_source else "Starting stream"
         detail = f" ({history_source})" if history_source else ""
+        queue_note = f" · queue {self.queue.label()}" if self.queue.size else ""
         self.call_from_thread(
             self.notify,
-            f"{prefix}{detail}: {track.title}{resume_note}",
+            f"{prefix}{detail}: {track.title}{resume_note}{queue_note}",
             timeout=3,
         )
         try:
+            # Stop previous without treating it as an auto-advance trigger.
+            self._expect_playback = False
             url = self.client.build_play_url(track)
             headers = {
                 "authorization": self.settings.authorization,
@@ -673,7 +767,9 @@ class MelodifyApp(App[None]):
                 http_headers=headers,
                 start_seconds=float(start_seconds or 0),
             )
+            self._expect_playback = True
         except (MelodifyAPIError, PlayerError) as exc:
+            self._expect_playback = False
             self.call_from_thread(
                 self.notify,
                 f"Play failed: {exc}",
@@ -682,10 +778,10 @@ class MelodifyApp(App[None]):
             )
             return
         backend = self.player.backend.name
-        hint = "Space pause · ←/→ seek · -/= vol · s stop"
+        hint = "Space pause · n/b next/prev · ←/→ seek · s stop"
         self.call_from_thread(
             self.notify,
-            f"Playing via {backend}: {track.title} — {hint}",
+            f"Playing via {backend}: {track.title} [{self.queue.label()}] — {hint}",
             timeout=5,
         )
 

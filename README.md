@@ -92,12 +92,21 @@ Melodify’s desktop “recently listened” screen is mostly **local** in the P
 | `l` | Load last-played list |
 | `p` | Play highlighted song |
 | Space | Pause / resume (mpv IPC) |
+| `n` / `>` | Next in queue |
+| `b` / `<` | Previous in queue |
 | `←` / `→` | Seek −5s / +5s |
 | Shift+`←` / `→` | Seek −10s / +10s |
 | `-` / `=` | Volume down / up |
 | `s` | Stop playback |
 | Backspace | Go back |
 | `q` | Quit |
+
+### Play queue
+
+When you play a song from **search results**, **artist tracks**, **album tracks**, or **last played**, that list becomes the in-memory queue and playback starts at the selected item. Continue listening loads the online history list as the queue.
+
+- **No wrap** at the edges — next at the end / prev at the start is a no-op (with a short notice).
+- When the current track ends, Melodify **auto-advances** to the next queue item if one exists.
 
 ### CLI playback controls
 
@@ -106,12 +115,14 @@ While `melodify play` / `melodify continue` is running in a TTY with **mpv**:
 | Key | Action |
 |---|---|
 | Space / `p` | Pause / resume |
+| `n` / `>` | Next in queue |
+| `b` / `<` | Previous in queue |
 | `←` / `→` | Seek ±5s |
 | `[` / `]` | Seek ±10s |
 | `-` / `=` | Volume ±5 |
 | `s` / `q` | Stop |
 
-Pause/seek/volume need `mpv` (JSON IPC). `ffplay` can only stop.
+Pause/seek/volume/next need `mpv` (JSON IPC). `ffplay` can only stop.
 
 ## How playback works
 

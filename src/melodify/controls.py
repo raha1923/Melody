@@ -6,7 +6,9 @@ import termios
 import tty
 from collections.abc import Callable
 
+from .models import Track
 from .player import PlayerError, StreamPlayer
+from .queue import PlayQueue
 
 
 def _format_time(seconds: float | None) -> str:
@@ -24,11 +26,13 @@ def interactive_playback_loop(
     player: StreamPlayer,
     *,
     on_position: Callable[[float], None] | None = None,
+    queue: PlayQueue | None = None,
+    play_track: Callable[[Track], None] | None = None,
 ) -> None:
-    """Simple nvlc-ish stdin control loop for CLI play/continue.
+    """TTY control loop for CLI play/continue.
 
-    Keys: space pause · ←/→ or [/] seek · -/= volume · s/q stop.
-    No-op when stdin is not a TTY (falls back to wait-on-process).
+    Keys: space pause · n/> next · b/< prev · ←/→ [/] seek · -/= volume · s/q stop.
+    Queue edges do not wrap. When the current track ends, auto-advances if possible.
     """
     if not sys.stdin.isatty() or not player.supports_ipc:
         try:
@@ -39,17 +43,47 @@ def interactive_playback_loop(
             if on_position and pos is not None:
                 on_position(pos)
             print("\nStopped.", flush=True)
+        if (
+            queue is not None
+            and play_track is not None
+            and not player.is_alive
+            and queue.peek_next() is not None
+        ):
+            nxt = queue.advance()
+            if nxt is not None:
+                print(f"Next: {nxt.label()}", flush=True)
+                play_track(nxt)
+                interactive_playback_loop(
+                    player,
+                    on_position=on_position,
+                    queue=queue,
+                    play_track=play_track,
+                )
         return
 
     print(
-        "Controls: Space pause · ←/→ seek 5s · [/] seek 10s · -/= volume · s stop · q quit",
+        "Controls: Space pause · n/> next · b/< prev · ←/→ seek · -/= vol · s stop",
         flush=True,
     )
     fd = sys.stdin.fileno()
     old = termios.tcgetattr(fd)
     try:
         tty.setcbreak(fd)
-        while player.is_alive:
+        while True:
+            if not player.is_alive:
+                if (
+                    queue is not None
+                    and play_track is not None
+                    and queue.peek_next() is not None
+                ):
+                    nxt = queue.advance()
+                    if nxt is not None:
+                        print(f"\nNext: {nxt.label()}", flush=True)
+                        play_track(nxt)
+                        continue
+                print("\nQueue finished." if queue and queue.size else "\nTrack finished.", flush=True)
+                return
+
             ready, _, _ = select.select([sys.stdin], [], [], 0.4)
             if not ready:
                 continue
@@ -73,8 +107,33 @@ def interactive_playback_loop(
                         on_position(pos)
                     print("\nStopped.", flush=True)
                     return
+                elif ch in ("n", ">"):
+                    if queue is None or play_track is None:
+                        print("\nNo queue loaded.", flush=True)
+                        continue
+                    nxt = queue.advance()
+                    if nxt is None:
+                        print("\nEnd of queue — no next track.", flush=True)
+                        continue
+                    pos = player.get_position()
+                    if on_position and pos is not None:
+                        on_position(pos)
+                    print(f"\nNext [{queue.label()}]: {nxt.label()}", flush=True)
+                    play_track(nxt)
+                elif ch in ("b", "<"):
+                    if queue is None or play_track is None:
+                        print("\nNo queue loaded.", flush=True)
+                        continue
+                    prev = queue.retreat()
+                    if prev is None:
+                        print("\nStart of queue — no previous track.", flush=True)
+                        continue
+                    pos = player.get_position()
+                    if on_position and pos is not None:
+                        on_position(pos)
+                    print(f"\nPrev [{queue.label()}]: {prev.label()}", flush=True)
+                    play_track(prev)
                 elif ch == "\x1b":
-                    # Arrow keys: ESC [ C/D
                     seq = sys.stdin.read(2)
                     if seq == "[C":
                         player.seek(5)
@@ -95,9 +154,8 @@ def interactive_playback_loop(
                     print(f"\rVolume {vol:.0f}%   ", end="", flush=True)
             except PlayerError as exc:
                 print(f"\n{exc}", flush=True)
-                if not player.is_alive:
+                if not player.is_alive and (queue is None or queue.peek_next() is None):
                     return
-        print("\nTrack finished.", flush=True)
     except KeyboardInterrupt:
         pos = player.stop()
         if on_position and pos is not None:

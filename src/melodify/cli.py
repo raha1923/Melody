@@ -10,6 +10,7 @@ from .models import Track
 from .controls import interactive_playback_loop
 from .player import PlayerError, StreamPlayer, detect_player
 from .progress import ProgressStore
+from .queue import PlayQueue
 from .tui import run_tui
 
 
@@ -170,7 +171,13 @@ def main(argv: list[str] | None = None) -> int:
                         file=sys.stderr,
                     )
                     return 1
-                track = history.tracks[0]
+                queue = PlayQueue()
+                track = queue.load(
+                    history.tracks,
+                    start=0,
+                    source=history.describe_source(),
+                )
+                assert track is not None
                 start = (
                     args.start_seconds
                     if args.start_seconds is not None
@@ -180,16 +187,20 @@ def main(argv: list[str] | None = None) -> int:
                         duration=track.duration,
                     )
                 )
-                print(f"Continue ({history.describe_source()}): {track.label()}")
+                print(
+                    f"Continue ({history.describe_source()}): {track.label()} "
+                    f"[{queue.label()}]",
+                    flush=True,
+                )
                 if start > 0:
                     mins, secs = divmod(int(start), 60)
-                    print(f"Resuming at {mins}:{secs:02d}")
+                    print(f"Resuming at {mins}:{secs:02d}", flush=True)
                 else:
-                    print("No saved position — starting from the beginning.")
-                return _stream_track(
+                    print("No saved position — starting from the beginning.", flush=True)
+                return _stream_queue(
                     client,
                     settings,
-                    track,
+                    queue,
                     quality=args.quality,
                     start_seconds=start,
                     progress=progress,
@@ -199,7 +210,9 @@ def main(argv: list[str] | None = None) -> int:
                 if not results.tracks:
                     print(f'No tracks found for “{args.query}”.', file=sys.stderr)
                     return 1
-                track = results.tracks[0]
+                queue = PlayQueue()
+                track = queue.load(results.tracks, start=0, source="search")
+                assert track is not None
                 start = (
                     args.start_seconds
                     if args.start_seconds is not None
@@ -209,14 +222,14 @@ def main(argv: list[str] | None = None) -> int:
                         duration=track.duration,
                     )
                 )
-                print(f"Playing: {track.label()}")
+                print(f"Playing: {track.label()} [{queue.label()}]", flush=True)
                 if start > 0:
                     mins, secs = divmod(int(start), 60)
-                    print(f"Resuming at {mins}:{secs:02d}")
-                return _stream_track(
+                    print(f"Resuming at {mins}:{secs:02d}", flush=True)
+                return _stream_queue(
                     client,
                     settings,
-                    track,
+                    queue,
                     quality=args.quality,
                     start_seconds=start,
                     progress=progress,
@@ -232,16 +245,15 @@ def main(argv: list[str] | None = None) -> int:
     return 2
 
 
-def _stream_track(
+def _stream_queue(
     client: MelodifyClient,
     settings,
-    track: Track,
+    queue: PlayQueue,
     *,
     quality: str | None,
     start_seconds: float,
     progress: ProgressStore,
 ) -> int:
-    url = client.build_play_url(track, quality=quality)
     print(f"Player:  {settings.player}", flush=True)
     player = StreamPlayer(preferred=settings.player)
     headers = {
@@ -252,32 +264,45 @@ def _stream_track(
         "Origin": settings.origin,
         "Referer": f"{settings.origin}/",
     }
-    # Mark listen online (same endpoint the PWA uses after ~15s of play).
-    client.record_listen(track)
-    progress.save_position(
-        track.id,
-        start_seconds,
-        title=track.title,
-        mark_last=True,
-    )
-    player.play(
-        url,
-        title=track.label(),
-        http_headers=headers,
-        start_seconds=start_seconds,
-    )
 
-    def _save(pos: float) -> None:
-        progress.save_position(track.id, pos, title=track.title, mark_last=True)
+    def _save_for_current(pos: float) -> None:
+        current = queue.current
+        if current is None:
+            return
+        progress.save_position(
+            current.id, pos, title=current.title, mark_last=True
+        )
 
-    interactive_playback_loop(player, on_position=_save)
-    # If the track finished naturally (still no live process), clear resume point.
-    if not player.is_alive:
-        # Keep a mid-track stop position; only clear when we reached near the end.
-        pos = progress.get_position(track.id)
-        duration = track.duration or 0
+    def _play_track(track: Track, *, seek: float = 0.0) -> None:
+        url = client.build_play_url(track, quality=quality)
+        client.record_listen(track)
+        progress.save_position(
+            track.id, seek, title=track.title, mark_last=True
+        )
+        player.play(
+            url,
+            title=track.label(),
+            http_headers=headers,
+            start_seconds=seek,
+        )
+
+    first = queue.current
+    if first is None:
+        print("Queue is empty.", file=sys.stderr)
+        return 1
+    _play_track(first, seek=start_seconds)
+    interactive_playback_loop(
+        player,
+        on_position=_save_for_current,
+        queue=queue,
+        play_track=lambda track: _play_track(track, seek=0.0),
+    )
+    current = queue.current
+    if current is not None and not player.is_alive:
+        pos = progress.get_position(current.id)
+        duration = current.duration or 0
         if pos is None or (duration and pos >= max(duration - 3, 1)):
-            progress.clear_position(track.id)
+            progress.clear_position(current.id)
     return 0
 
 
