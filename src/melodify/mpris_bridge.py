@@ -421,8 +421,8 @@ def diagnose_os_media() -> list[tuple[str, bool, str]]:
             (
                 "mpris-server",
                 False,
-                "missing — pip install --no-deps mpris-server "
-                "(never pip-install PyGObject; use apt python3-gi) "
+                "missing — pip install -e '.[mpris]' "
+                "&& pip install --no-deps mpris-server "
                 f"({exc})",
             )
         )

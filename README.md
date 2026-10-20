@@ -27,8 +27,8 @@ git pull
 python3 -m venv --system-site-packages .venv
 source .venv/bin/activate
 
-pip install -e .                 # core app (no MPRIS build deps)
-pip install --no-deps mpris-server   # OS media keys; uses system PyGObject
+pip install -e ".[mpris]"        # core + pure-Python MPRIS deps (StrEnum, pydbus, …)
+pip install --no-deps mpris-server   # uses apt PyGObject — do not omit --no-deps
 
 melodify doctor                  # verifies MPRIS wiring
 ```
@@ -40,7 +40,7 @@ deactivate
 rm -rf .venv
 python3 -m venv --system-site-packages .venv
 source .venv/bin/activate
-pip install -e .
+pip install -e ".[mpris]"
 pip install --no-deps mpris-server
 ```
 
