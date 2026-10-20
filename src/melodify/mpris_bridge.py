@@ -141,7 +141,7 @@ class MelodifyMpris:
         except ImportError as exc:
             self.last_error = (
                 f"mpris-server not installed ({exc}). "
-                "Run: pip install --no-deps mpris-server"
+                "Run: pip install -e '.[mpris]' && pip install --no-deps mpris-server"
             )
             log.info("MPRIS unavailable (install mpris-server): %s", exc)
             return False

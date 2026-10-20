@@ -163,7 +163,7 @@ playerctl -p Melodify next
 melodify doctor
 ```
 
-Needs: apt `python3-gi` + `gir1.2-glib-2.0`, a desktop session bus, and `pip install --no-deps mpris-server` (never `pip install PyGObject` — that tries to compile cairo). Set `MELODIFY_MPRIS=0` to disable.
+Needs: apt `python3-gi` + `gir1.2-glib-2.0`, a desktop session bus, `pip install -e ".[mpris]"`, then `pip install --no-deps mpris-server` (never `pip install PyGObject` — that compiles cairo). Set `MELODIFY_MPRIS=0` to disable.
 
 ### Long lists / pagination
 
