@@ -1,6 +1,6 @@
 [project]
 name = "melodify"
-version = "0.1.0"
+version = "0.2.0"
 description = "Terminal (TUI) music client for Melodify on Ubuntu and macOS"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -9,6 +9,12 @@ dependencies = [
   "python-dotenv>=1.0",
   "textual>=0.80",
 ]
+
+[project.urls]
+# Replace OWNER/REPO after the public GitHub (or Origin) repository exists.
+Homepage = "https://github.com/OWNER/REPO"
+Issues = "https://github.com/OWNER/REPO/issues"
+ReleaseNotes = "https://github.com/OWNER/REPO/blob/main/docs/RELEASE_NOTES.md"
 
 [project.optional-dependencies]
 # Pure-Python MPRIS helpers only. Do NOT list mpris-server / PyGObject here —
@@ -26,6 +32,10 @@ mpris = [
 macos = [
   "pyobjc-framework-MediaPlayer>=10.0",
 ]
+dev = [
+  "pytest>=8.0",
+  "build>=1.0",
+]
 
 [project.scripts]
 melodify = "melodify.cli:main"
@@ -36,3 +46,7 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

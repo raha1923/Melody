@@ -296,7 +296,6 @@ def _stream_queue(
 
     def _play_track(track: Track, *, seek: float = 0.0) -> None:
         url = client.build_play_url(track, quality=quality)
-        client.record_listen(track)
         progress.save_position(
             track.id, seek, title=track.title, mark_last=True
         )
@@ -307,6 +306,10 @@ def _stream_queue(
             http_headers=headers,
             start_seconds=seek,
         )
+        try:
+            client.record_listen(track)
+        except Exception:  # noqa: BLE001
+            pass
         media.notify(title=True, playpause=True)
 
     media.attach(

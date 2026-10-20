@@ -25,9 +25,55 @@ brew install mpv python
 # Apple Silicon / Homebrew Python is fine; system python3 also works on recent macOS
 ```
 
-## Install / update
+## Install (recommended: pipx + release wheel)
+
+No clone or manual venv required. Grab a wheel from the [GitHub Releases](https://github.com/OWNER/REPO/releases) page (or build one with `./scripts/build-release.sh`), then:
 
 ### Ubuntu
+
+```bash
+sudo apt update
+sudo apt install -y mpv pipx python3-gi gir1.2-glib-2.0
+pipx ensurepath
+
+# One-liner once a release exists (replace OWNER/REPO and version):
+pipx install "https://github.com/OWNER/REPO/releases/download/v0.2.0/melodify-0.2.0-py3-none-any.whl"
+
+# Optional MPRIS (GNOME/KDE media keys) — inject into the pipx env:
+pipx inject melodify StrEnum 'emoji>=2.8,<3' 'pydbus>=0.6,<0.7' 'unidecode>=1.3,<2'
+pipx inject --pip-args='--no-deps' melodify mpris-server
+
+melodify doctor
+```
+
+Or download the `.whl` from the release assets and run `pipx install ./melodify-0.2.0-py3-none-any.whl`.
+
+### macOS
+
+```bash
+brew install mpv pipx
+pipx ensurepath
+
+pipx install "https://github.com/OWNER/REPO/releases/download/v0.2.0/melodify-0.2.0-py3-none-any.whl"
+
+# Optional Now Playing / media keys:
+pipx inject melodify 'pyobjc-framework-MediaPlayer>=10'
+
+melodify doctor
+```
+
+`OWNER/REPO` is a placeholder until the public repository URL is set. Until then, build a wheel locally:
+
+```bash
+./scripts/build-release.sh          # writes dist/*.whl
+pipx install dist/melodify-*-py3-none-any.whl
+```
+
+PyPI publish is a later option (`pipx install melodify`); packaging already exposes the `melodify` console entry point.
+
+### Dev install from a clone
+
+#### Ubuntu
 
 ```bash
 cd /path/to/this/repo
@@ -43,7 +89,7 @@ pip install --no-deps mpris-server   # uses apt PyGObject — do not omit --no-d
 melodify doctor
 ```
 
-### macOS
+#### macOS
 
 ```bash
 cd /path/to/this/repo
@@ -257,9 +303,24 @@ Base: `https://melodify.pw/api/desktop/v9`
 
 See internal notes (agent store) for reverse-engineering details.
 
+## Releases / packaging
+
+| Piece | Role |
+|---|---|
+| `pyproject.toml` | Package metadata + `melodify` entry point (`melodify = melodify.cli:main`) |
+| `scripts/build-release.sh` | Build sdist + wheel into `dist/` (optional version bump: `./scripts/build-release.sh 0.2.1`) |
+| `.github/workflows/release.yml` | On tag `v*`, build artifacts and attach them to a GitHub Release |
+| `docs/RELEASE_NOTES.md` | User-facing notes template + checklist |
+
+**Tag a release (GitHub):** bump version → commit → `git tag v0.2.0 && git push origin v0.2.0`. CI attaches the wheel/sdist.
+
+**Origin:** Origin-native release file attach can be limited. Preferred path is GitHub Releases (above) or run `./scripts/build-release.sh` and upload `dist/*.whl` / `dist/*.tar.gz` to whatever release UI your forge provides. See `docs/RELEASE_NOTES.md`.
+
 ## Troubleshooting
 
 - **Missing env vars** — copy `.env.example` → `.env` and fill all four required keys.
 - **Auth rejected (401/403)** — refresh the token from a logged-in desktop.melodify.app session.
 - **502 / timeouts** — Melodify’s API is occasionally flaky; retry.
 - **No sound** — confirm `mpv` works (`mpv --version`) and your session has stream rights for the track.
+- **Next track waits ~30s** — fixed in 0.2.0 (EOF via mpv `eof-reached`, not process exit). Upgrade the wheel or pull latest.
+- **Song restarts after ~30s on manual play** — fixed in 0.2.0 (play before `/listens` + generation guards). Upgrade or pull latest.

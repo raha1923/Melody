@@ -932,10 +932,16 @@ class MelodifyApp(App[None]):
         self._playback_started_at = 0.0
         self._auto_advance = True
         self._prefetch_inflight = False
+        # Bumped on every play request so stale exclusive thread-workers cannot
+        # restart mpv after a slow /listens call (~30s restart bug).
+        self._play_generation = 0
+        self._last_select_id: int | None = None
+        self._last_select_at = 0.0
 
     def on_mount(self) -> None:
         self.push_screen(SearchScreen())
-        self.set_interval(0.5, self._on_player_tick)
+        # Faster than 0.5s so EOF → next track feels immediate.
+        self.set_interval(0.2, self._on_player_tick)
         self._start_os_media()
         missing = self.settings.missing()
         if missing:
@@ -1053,11 +1059,15 @@ class MelodifyApp(App[None]):
         try:
             if self.player.is_alive and self.player.is_paused:
                 self.player.resume()
-            elif self._last_track is not None and not self.player.is_alive:
-                self._play_track(self._last_track, from_queue=True)
-                return
             elif self.player.is_alive:
                 self.player.resume()
+            elif self._last_track is not None:
+                # OS media stacks sometimes echo Play right after we publish
+                # metadata; ignore that while a start is in flight.
+                if (time.time() - self._playback_started_at) < 2.5:
+                    return
+                self._play_track(self._last_track, start_seconds=0, from_queue=True)
+                return
             else:
                 self.notify("Nothing to resume — pick a song first.", severity="warning")
                 return
@@ -1365,11 +1375,21 @@ class MelodifyApp(App[None]):
     def _watch_playback_end(self) -> None:
         if not self._expect_playback or not self._auto_advance:
             return
-        if self.player.is_alive:
+        alive = self.player.is_alive
+        eof = self.player.reached_eof() if alive or self._saw_alive else False
+        if alive and not eof:
             self._saw_alive = True
             return
         # Ignore the brief window before mpv is up, otherwise we'd skip tracks.
-        if not self._saw_alive or (time.time() - self._playback_started_at) < 1.5:
+        if not self._saw_alive or (time.time() - self._playback_started_at) < 1.0:
+            return
+        if alive and eof:
+            # Don't wait for HTTP keep-alive to tear down the process.
+            try:
+                self.player.stop()
+            except Exception:  # noqa: BLE001
+                pass
+        elif alive:
             return
         self._expect_playback = False
         self._saw_alive = False
@@ -1470,12 +1490,21 @@ class MelodifyApp(App[None]):
         track, queue_tracks, source, pager = context
         self.queue.load(queue_tracks, start=track, source=source)
         self._attach_queue_pager(pager)
-        self._play_track(track, from_queue=True)
+        self._play_track(track, start_seconds=0, from_queue=True)
 
     def on_track_selected(self, event: TrackSelected) -> None:
+        # Debounce duplicate Enter/Selected messages for the same track.
+        now = time.time()
+        if (
+            self._last_select_id == event.track.id
+            and (now - self._last_select_at) < 0.6
+        ):
+            return
+        self._last_select_id = event.track.id
+        self._last_select_at = now
         self.queue.load(event.queue, start=event.track, source=event.source or "list")
         self._attach_queue_pager(event.pager)
-        self._play_track(event.track, from_queue=True)
+        self._play_track(event.track, start_seconds=0, from_queue=True)
 
     def on_artist_selected(self, event: ArtistSelected) -> None:
         self.push_screen(ArtistScreen(event.artist))
@@ -1522,8 +1551,18 @@ class MelodifyApp(App[None]):
         if not from_queue and self.queue.current is None:
             self.queue.load([track], start=track, source="single")
         self._last_track = track
+        self._play_generation += 1
+        generation = self._play_generation
+        # Stop expecting the previous track so its end-watcher cannot race us.
+        self._expect_playback = False
+        self._saw_alive = False
         self.run_worker(
-            partial(self._play_worker, track, start_seconds=start_seconds),
+            partial(
+                self._play_worker,
+                track,
+                start_seconds=start_seconds,
+                generation=generation,
+            ),
             exclusive=True,
             thread=True,
         )
@@ -1582,10 +1621,12 @@ class MelodifyApp(App[None]):
             api_progress=track.progress_seconds,
             duration=track.duration,
         )
+        self._play_generation += 1
         self._play_worker(
             track,
             start_seconds=start,
             history_source=history.describe_source(),
+            generation=self._play_generation,
         )
 
     def _play_worker(
@@ -1594,7 +1635,11 @@ class MelodifyApp(App[None]):
         *,
         start_seconds: float | None = None,
         history_source: str | None = None,
+        generation: int = 0,
     ) -> None:
+        def _stale() -> bool:
+            return generation != 0 and generation != self._play_generation
+
         title = track.label()
         if start_seconds is None:
             start_seconds = self.progress.resolve_start_seconds(
@@ -1607,6 +1652,8 @@ class MelodifyApp(App[None]):
             resume_note = f" @ {_fmt_time(start_seconds)}"
         prefix = "Continuing" if history_source else "Starting"
         detail = f" ({history_source})" if history_source else ""
+        if _stale():
+            return
         self.call_from_thread(
             self.notify,
             f"{prefix}{detail}: {track.title}{resume_note} · {self.queue.label()}",
@@ -1615,6 +1662,8 @@ class MelodifyApp(App[None]):
         try:
             self._expect_playback = False
             url = self.client.build_play_url(track)
+            if _stale():
+                return
             headers = {
                 "authorization": self.settings.authorization,
                 "user-id": self.settings.user_id,
@@ -1623,7 +1672,6 @@ class MelodifyApp(App[None]):
                 "Origin": self.settings.origin,
                 "Referer": f"{self.settings.origin}/",
             }
-            self.client.record_listen(track)
             seek = float(start_seconds or 0)
             self.progress.save_position(
                 track.id,
@@ -1632,16 +1680,27 @@ class MelodifyApp(App[None]):
                 mark_last=True,
             )
             self.recent.upsert(track, position_seconds=seek)
+            if _stale():
+                return
+            # Start audio first — never block playback on /listens.
             self.player.play(
                 url,
                 title=title,
                 http_headers=headers,
                 start_seconds=seek,
             )
+            if _stale():
+                try:
+                    self.player.stop()
+                except Exception:  # noqa: BLE001
+                    pass
+                return
             self._saw_alive = False
             self._playback_started_at = time.time()
             self._expect_playback = True
         except (MelodifyAPIError, PlayerError) as exc:
+            if _stale():
+                return
             self._expect_playback = False
             self._saw_alive = False
             self.call_from_thread(
@@ -1650,6 +1709,13 @@ class MelodifyApp(App[None]):
                 severity="error",
                 timeout=6,
             )
+            return
+        # Fire-and-forget listen accounting (slow/hanging API must not re-enter play).
+        try:
+            self.client.record_listen(track)
+        except Exception:  # noqa: BLE001
+            pass
+        if _stale():
             return
         self.call_from_thread(self.refresh_player_chrome)
         self.call_from_thread(self.mpris.notify, title=True, playpause=True)
