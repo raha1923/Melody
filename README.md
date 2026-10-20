@@ -15,13 +15,16 @@ sudo apt update
 sudo apt install -y python3 python3-pip python3-venv mpv
 ```
 
-## Install
+## Install / update
 
 ```bash
 cd /path/to/this/repo
+git pull
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e .
+# or, if already installed:
+# pip install -e . --force-reinstall --no-deps
 ```
 
 ## Configure
@@ -71,16 +74,33 @@ melodify search "googoosh"
 melodify artist 251
 melodify album 926
 melodify play "برای من"
-melodify last                 # online listening history
-melodify continue             # resume top history track
+melodify last                 # local recently-played (online fallback)
+melodify continue             # resume top recent track
 ```
 
-### Continue listening
+### Continue listening / last played
 
-Melodify’s desktop “recently listened” screen is mostly **local** in the PWA, but listens are recorded online via `POST /listens` and aggregated in `POST /getUserMostListenedTracks`.
+Melodify’s PWA “recently listened” list is **offline** (local Redux/IndexedDB). Melodify mirrors that locally:
 
-- `melodify last` lists that online history (prefers `recently_listened` when the API returns tracks; otherwise most-listened).
-- `melodify continue` plays the first history track. If a saved position exists (API field or local `~/.local/share/melodify/playback.json`), playback seeks there; otherwise it starts at 0.
+| File | Purpose |
+|---|---|
+| `~/.local/share/melodify/recent.json` | Recently played list (deduped by track id, capped at 50) |
+| `~/.local/share/melodify/playback.json` | Scrubber positions for continue/seek |
+
+- Every successful play start (and pause/stop/finish) **upserts** the track to the front of `recent.json`.
+- `melodify last` / TUI **Last played** prefer that local list. If it is empty, they fall back to online `getUserMostListenedTracks` (after a short `recently_listened` probe).
+- `melodify continue` / TUI **Continue** resume the first track from that preferred list. Seek uses `playback.json` (or an API progress field when present); otherwise starts at 0.
+
+### TUI layout (nvlc-ish)
+
+```
+┌ Browse (search / lists)     │ Now playing + progress bar     ┐
+│ Songs · Artists · Albums    │ Queue (▶ current, upcoming)    │
+│ Last played                 │ Space pause · n/b next/prev    │
+└─────────────────────────────┴────────────────────────────────┘
+```
+
+Right pane updates from mpv IPC ~2×/sec while a track is playing.
 
 ### TUI keys
 
@@ -88,12 +108,41 @@ Melodify’s desktop “recently listened” screen is mostly **local** in the P
 |---|---|
 | `/` | Focus search |
 | Enter | Search / open / play highlighted song |
-| `c` | Continue listening (online history) |
-| `l` | Load last-played list |
+| `c` | Continue listening (local recent first) |
+| `l` | Load last-played list (local recent first) |
 | `p` | Play highlighted song |
+| Space | Pause / resume (mpv IPC) |
+| `n` / `>` | Next in queue |
+| `b` / `<` | Previous in queue |
+| `←` / `→` | Seek −5s / +5s |
+| Shift+`←` / `→` | Seek −10s / +10s |
+| `-` / `=` | Volume down / up |
 | `s` | Stop playback |
 | Backspace | Go back |
 | `q` | Quit |
+
+### Play queue
+
+When you play a song from **search results**, **artist tracks**, **album tracks**, or **last played**, that list becomes the in-memory queue and playback starts at the selected item. Continue listening loads the preferred history list (local recent, else online) as the queue.
+
+- **No wrap** at the edges — next at the end / prev at the start is a no-op (with a short notice).
+- When the current track ends, Melodify **auto-advances** to the next queue item if one exists.
+
+### CLI playback controls
+
+While `melodify play` / `melodify continue` is running in a TTY with **mpv**:
+
+| Key | Action |
+|---|---|
+| Space / `p` | Pause / resume |
+| `n` / `>` | Next in queue |
+| `b` / `<` | Previous in queue |
+| `←` / `→` | Seek ±5s |
+| `[` / `]` | Seek ±10s |
+| `-` / `=` | Volume ±5 |
+| `s` / `q` | Stop |
+
+Pause/seek/volume/next need `mpv` (JSON IPC). `ffplay` can only stop.
 
 ## How playback works
 
@@ -101,6 +150,7 @@ Melodify’s desktop “recently listened” screen is mostly **local** in the P
 2. The client appends `type=pwa`, `melodify_token`, `download_token`, and a `stamp…` query.
 3. `cdn.melodify.pw` responds with a short-lived **307** to `s*-cdn.melodify.pw`.
 4. `mpv`/`ffplay` follows the redirect and streams audio — Melodify’s Python process only holds the URL, not the file.
+5. With `mpv`, Melodify opens a Unix JSON IPC socket (`--input-ipc-server`) for pause, seek, and volume without re-buffering the track.
 
 ## API surface used
 
