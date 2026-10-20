@@ -8,9 +8,11 @@ from .api import MelodifyAPIError, MelodifyClient
 from .config import load_settings
 from .models import Track
 from .controls import interactive_playback_loop
+from .history import resolve_listening_history
 from .player import PlayerError, StreamPlayer, detect_player
 from .progress import ProgressStore
 from .queue import PlayQueue
+from .recent import RecentStore
 from .tui import run_tui
 
 
@@ -63,7 +65,7 @@ def main(argv: list[str] | None = None) -> int:
 
     p_last = sub.add_parser(
         "last",
-        help="List online listening history (recently listened / most listened).",
+        help="List recently played (local first; online most-listened fallback).",
     )
     p_last.add_argument(
         "--limit",
@@ -74,7 +76,7 @@ def main(argv: list[str] | None = None) -> int:
 
     p_continue = sub.add_parser(
         "continue",
-        help="Resume the top online listening-history track (continue listening).",
+        help="Resume the top recently-played track (local first; online fallback).",
     )
     p_continue.add_argument(
         "--from",
@@ -103,6 +105,7 @@ def main(argv: list[str] | None = None) -> int:
 
     command = args.command or "tui"
     progress = ProgressStore()
+    recent = RecentStore()
 
     if command == "tui":
         try:
@@ -140,14 +143,15 @@ def main(argv: list[str] | None = None) -> int:
                     print(f"[{track.id}] {track.label()}")
                 return 0
             if command == "last":
-                history = client.get_listening_history()
+                history = resolve_listening_history(client, recent)
                 if not history.tracks:
                     print(
-                        "No online listening history yet. Play something in Melodify "
-                        "(or here) so listens can accumulate."
+                        "No local recently-played tracks yet, and online history is empty.\n"
+                        "Play something with `melodify play` / the TUI first."
                     )
                     return 0
                 print(f"Listening history ({history.describe_source()}):")
+                print(f"(file: {recent.path})")
                 for track in history.tracks[: max(1, args.limit)]:
                     start = progress.resolve_start_seconds(
                         track.id,
@@ -164,10 +168,10 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 return 0
             if command == "continue":
-                history = client.get_listening_history()
+                history = resolve_listening_history(client, recent)
                 if not history.tracks:
                     print(
-                        "Nothing to continue — online listening history is empty.",
+                        "Nothing to continue — local and online history are empty.",
                         file=sys.stderr,
                     )
                     return 1
@@ -204,6 +208,7 @@ def main(argv: list[str] | None = None) -> int:
                     quality=args.quality,
                     start_seconds=start,
                     progress=progress,
+                    recent=recent,
                 )
             if command == "play":
                 results = client.search(args.query, search_type=1)
@@ -233,6 +238,7 @@ def main(argv: list[str] | None = None) -> int:
                     quality=args.quality,
                     start_seconds=start,
                     progress=progress,
+                    recent=recent,
                 )
         except MelodifyAPIError as exc:
             print(f"API error: {exc}", file=sys.stderr)
@@ -253,6 +259,7 @@ def _stream_queue(
     quality: str | None,
     start_seconds: float,
     progress: ProgressStore,
+    recent: RecentStore,
 ) -> int:
     print(f"Player:  {settings.player}", flush=True)
     player = StreamPlayer(preferred=settings.player)
@@ -272,6 +279,7 @@ def _stream_queue(
         progress.save_position(
             current.id, pos, title=current.title, mark_last=True
         )
+        recent.upsert(current, position_seconds=pos)
 
     def _play_track(track: Track, *, seek: float = 0.0) -> None:
         url = client.build_play_url(track, quality=quality)
@@ -279,6 +287,7 @@ def _stream_queue(
         progress.save_position(
             track.id, seek, title=track.title, mark_last=True
         )
+        recent.upsert(track, position_seconds=seek)
         player.play(
             url,
             title=track.label(),
