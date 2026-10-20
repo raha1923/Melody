@@ -384,11 +384,6 @@ class MelodifyClient:
         except MelodifyAPIError:
             pass
 
-        if offset == 0:
-            tracks = self.get_most_listened_tracks_all()
-            return ListeningHistory(
-                tracks=tracks, source="most_listened", end=True
-            )
         tracks, end = self.get_most_listened_tracks(offset=offset)
         return ListeningHistory(tracks=tracks, source="most_listened", end=end)
 

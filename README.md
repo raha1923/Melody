@@ -113,6 +113,7 @@ Right pane updates from mpv IPC ~2×/sec while a track is playing.
 | ↑ / ↓ / `j` `k` | Move highlight in the focused list |
 | PgUp / PgDn | Jump by page in long lists |
 | Home / End | Jump to first / last list item |
+| `m` / **Load more** | Fetch the next Melodify page into the focused list |
 | `c` | Continue listening (local recent first) |
 | `l` | Load last-played list (local recent first) |
 | `p` | Play highlighted song |
@@ -146,12 +147,23 @@ Set `MELODIFY_MPRIS=0` to disable. Headless environments without a session bus s
 
 Melodify’s API returns about **40 items per page**. The client automatically fetches further pages (artist songs/albums, album tracks, most-listened) up to 500 items so the TUI list contains the full catalog, not just the first page. Use ↑↓ / PgUp/PgDn (or `j`/`k`) once the list is focused to reach items below the fold.
 
+### Pagination / Load more
+
+Melodify APIs return pages (~40 tracks). The TUI loads the first page, then:
+
+- Scroll onto the bottom **── Load more (m) ──** row, press **`m`**, **PgDn/End** at the bottom, or click **Load more**
+- New rows **append** (already-loaded tracks stay)
+- Playing from a list uses the **full loaded set** as the queue; near the end of the queue Melodify **prefetches** the next page when the API still has more (`end: false`)
+
+Applies to: search Songs/Artists/Albums, artist Songs/Albums, album tracks, and online last-played (local recent is already complete).
+
 ### Play queue
 
 When you play a song from **search results**, **artist tracks**, **album tracks**, or **last played**, that list becomes the in-memory queue and playback starts at the selected item. Continue listening loads the preferred history list (local recent, else online) as the queue.
 
 - **No wrap** at the edges — next at the end / prev at the start is a no-op (with a short notice).
 - When the current track ends, Melodify **auto-advances** to the next queue item if one exists.
+- If more Melodify pages exist for that list, they are pulled into the queue automatically when you get close to the end.
 
 ### CLI playback controls
 
