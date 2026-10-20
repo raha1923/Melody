@@ -7,6 +7,7 @@ from . import __version__
 from .api import MelodifyAPIError, MelodifyClient
 from .config import load_settings
 from .models import Track
+from .controls import interactive_playback_loop
 from .player import PlayerError, StreamPlayer, detect_player
 from .progress import ProgressStore
 from .tui import run_tui
@@ -241,7 +242,7 @@ def _stream_track(
     progress: ProgressStore,
 ) -> int:
     url = client.build_play_url(track, quality=quality)
-    print(f"Player:  {settings.player}")
+    print(f"Player:  {settings.player}", flush=True)
     player = StreamPlayer(preferred=settings.player)
     headers = {
         "authorization": settings.authorization,
@@ -265,15 +266,18 @@ def _stream_track(
         http_headers=headers,
         start_seconds=start_seconds,
     )
-    try:
-        if player._proc is not None:
-            player._proc.wait()
-        # Finished — clear resume point so a later continue starts fresh.
-        progress.clear_position(track.id)
-    except KeyboardInterrupt:
-        player.stop()
-        # Keep the start point we had; a fuller seek sync would need mpv IPC.
-        print("\nStopped.")
+
+    def _save(pos: float) -> None:
+        progress.save_position(track.id, pos, title=track.title, mark_last=True)
+
+    interactive_playback_loop(player, on_position=_save)
+    # If the track finished naturally (still no live process), clear resume point.
+    if not player.is_alive:
+        # Keep a mid-track stop position; only clear when we reached near the end.
+        pos = progress.get_position(track.id)
+        duration = track.duration or 0
+        if pos is None or (duration and pos >= max(duration - 3, 1)):
+            progress.clear_position(track.id)
     return 0
 
 

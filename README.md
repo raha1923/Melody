@@ -91,9 +91,27 @@ Melodify’s desktop “recently listened” screen is mostly **local** in the P
 | `c` | Continue listening (online history) |
 | `l` | Load last-played list |
 | `p` | Play highlighted song |
+| Space | Pause / resume (mpv IPC) |
+| `←` / `→` | Seek −5s / +5s |
+| Shift+`←` / `→` | Seek −10s / +10s |
+| `-` / `=` | Volume down / up |
 | `s` | Stop playback |
 | Backspace | Go back |
 | `q` | Quit |
+
+### CLI playback controls
+
+While `melodify play` / `melodify continue` is running in a TTY with **mpv**:
+
+| Key | Action |
+|---|---|
+| Space / `p` | Pause / resume |
+| `←` / `→` | Seek ±5s |
+| `[` / `]` | Seek ±10s |
+| `-` / `=` | Volume ±5 |
+| `s` / `q` | Stop |
+
+Pause/seek/volume need `mpv` (JSON IPC). `ffplay` can only stop.
 
 ## How playback works
 
@@ -101,6 +119,7 @@ Melodify’s desktop “recently listened” screen is mostly **local** in the P
 2. The client appends `type=pwa`, `melodify_token`, `download_token`, and a `stamp…` query.
 3. `cdn.melodify.pw` responds with a short-lived **307** to `s*-cdn.melodify.pw`.
 4. `mpv`/`ffplay` follows the redirect and streams audio — Melodify’s Python process only holds the URL, not the file.
+5. With `mpv`, Melodify opens a Unix JSON IPC socket (`--input-ipc-server`) for pause, seek, and volume without re-buffering the track.
 
 ## API surface used
 

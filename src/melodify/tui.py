@@ -423,7 +423,15 @@ class MelodifyApp(App[None]):
         Binding("q", "quit", "Quit"),
         Binding("p", "play_highlighted", "Play"),
         Binding("c", "continue_listening", "Continue"),
+        Binding("space", "toggle_pause", "Pause"),
         Binding("s", "stop_playback", "Stop"),
+        Binding("left", "seek_back", "Seek -5s"),
+        Binding("right", "seek_forward", "Seek +5s"),
+        Binding("shift+left", "seek_back_10", "Seek -10s"),
+        Binding("shift+right", "seek_forward_10", "Seek +10s"),
+        Binding("minus", "volume_down", "Vol -"),
+        Binding("equals", "volume_up", "Vol +"),
+        Binding("plus", "volume_up", "Vol +", show=False),
         Binding("backspace", "go_back", "Back"),
     ]
 
@@ -454,8 +462,81 @@ class MelodifyApp(App[None]):
             self.pop_screen()
 
     def action_stop_playback(self) -> None:
-        self.player.stop()
+        position = self.player.stop()
+        if self._last_track is not None and position is not None:
+            self.progress.save_position(
+                self._last_track.id,
+                position,
+                title=self._last_track.title,
+                mark_last=True,
+            )
         self.notify("Playback stopped.", timeout=2)
+
+    def action_toggle_pause(self) -> None:
+        try:
+            paused = self.player.toggle_pause()
+        except PlayerError as exc:
+            self.notify(str(exc), severity="warning", timeout=3)
+            return
+        status = self.player.status()
+        if paused and self._last_track is not None and status.position is not None:
+            self.progress.save_position(
+                self._last_track.id,
+                status.position,
+                title=self._last_track.title,
+                mark_last=True,
+            )
+        label = "Paused" if paused else "Playing"
+        pos = ""
+        if status.position is not None:
+            mins, secs = divmod(int(status.position), 60)
+            pos = f" @ {mins}:{secs:02d}"
+        self.notify(f"{label}{pos}", timeout=2)
+
+    def action_seek_back(self) -> None:
+        self._seek(-5)
+
+    def action_seek_forward(self) -> None:
+        self._seek(5)
+
+    def action_seek_back_10(self) -> None:
+        self._seek(-10)
+
+    def action_seek_forward_10(self) -> None:
+        self._seek(10)
+
+    def action_volume_up(self) -> None:
+        self._volume(5)
+
+    def action_volume_down(self) -> None:
+        self._volume(-5)
+
+    def _seek(self, delta: float) -> None:
+        try:
+            position = self.player.seek(delta)
+        except PlayerError as exc:
+            self.notify(str(exc), severity="warning", timeout=3)
+            return
+        if position is None:
+            self.notify(f"Seek {delta:+.0f}s", timeout=1)
+            return
+        mins, secs = divmod(int(position), 60)
+        self.notify(f"Seek → {mins}:{secs:02d}", timeout=1)
+        if self._last_track is not None:
+            self.progress.save_position(
+                self._last_track.id,
+                position,
+                title=self._last_track.title,
+                mark_last=True,
+            )
+
+    def _volume(self, delta: float) -> None:
+        try:
+            volume = self.player.volume_adjust(delta)
+        except PlayerError as exc:
+            self.notify(str(exc), severity="warning", timeout=3)
+            return
+        self.notify(f"Volume {volume:.0f}%", timeout=1)
 
     def action_continue_listening(self) -> None:
         self.run_worker(self._continue_worker(), exclusive=True, thread=True)
@@ -601,10 +682,11 @@ class MelodifyApp(App[None]):
             )
             return
         backend = self.player.backend.name
+        hint = "Space pause · ←/→ seek · -/= vol · s stop"
         self.call_from_thread(
             self.notify,
-            f"Playing via {backend}: {track.title} — press s to stop",
-            timeout=4,
+            f"Playing via {backend}: {track.title} — {hint}",
+            timeout=5,
         )
 
 
