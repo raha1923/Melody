@@ -265,7 +265,11 @@ class SelectableList(ListView):
 
 
 class PlayerChrome(Vertical):
-    """nvlc-style now-playing + progress + queue panel."""
+    """Now-playing + progress + quiet compact Up next (not rebuilt on IPC ticks)."""
+
+    # Compact default; expanded shows more upcoming. Toggle with `u`.
+    COMPACT_UPCOMING = 3
+    EXPANDED_UPCOMING = 12
 
     DEFAULT_CSS = """
     PlayerChrome {
@@ -296,20 +300,41 @@ class PlayerChrome(Vertical):
         color: #7dd3fc;
         height: 1;
     }
-    #np-queue {
-        height: 1fr;
-        border: tall #1e293b;
-        margin: 0;
+    #np-upnext {
+        height: auto;
+        max-height: 14;
+        color: #cbd5e1;
+        padding: 0 0 0 0;
     }
     """
 
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._expanded = False
+        # Dirty-check caches so the 0.2s IPC tick only touches time/progress.
+        self._last_title: str | None = None
+        self._last_meta: str | None = None
+        self._last_time: str | None = None
+        self._last_bar: int | None = None
+        self._last_queue_sig: tuple[Any, ...] | None = None
+
     def compose(self) -> ComposeResult:
         yield Label("Not playing — pick a song to start the queue.", id="np-title")
-        yield Label("Space pause · n/b next/prev · ←/→ seek · -/= vol", id="np-meta")
+        yield Label("Space pause · n/b next/prev · ←/→ seek · -/= vol · u Up next", id="np-meta")
         yield Label("--:-- / --:--", id="np-time")
         yield ProgressBar(id="np-bar", total=1000, show_eta=False, show_percentage=False)
-        yield Label("Queue (empty)", id="np-queue-label")
-        yield ListView(id="np-queue")
+        yield Label("Up next", id="np-queue-label")
+        yield Static(
+            "Queue empty — play from search, artist, album, or last.",
+            id="np-upnext",
+        )
+
+    def toggle_expanded(self) -> bool:
+        """Flip compact ↔ expanded Up next. Returns new expanded state."""
+        self._expanded = not self._expanded
+        # Force queue redraw on next refresh.
+        self._last_queue_sig = None
+        return self._expanded
 
     def refresh_state(
         self,
@@ -323,53 +348,95 @@ class PlayerChrome(Vertical):
     ) -> None:
         title = queue.current
         if title is None:
-            self.query_one("#np-title", Label).update(
-                "Not playing — pick a song to start the queue."
-            )
-            self.query_one("#np-meta", Label).update(
-                "Space pause · n/b next/prev · ←/→ seek · -/= vol"
-            )
-            self.query_one("#np-time", Label).update("--:-- / --:--")
-            bar = self.query_one("#np-bar", ProgressBar)
-            bar.update(progress=0)
-            self.query_one("#np-queue-label", Label).update("Queue (empty)")
-            self._render_queue([])
+            self._set_title("Not playing — pick a song to start the queue.")
+            self._set_meta("Space pause · n/b next/prev · ←/→ seek · -/= vol · u Up next")
+            self._set_time("--:-- / --:--")
+            self._set_bar(0)
+            self._refresh_up_next(queue)
             return
 
         state = "Paused" if paused else ("Playing" if playing else "Stopped")
         vol = f" · vol {volume:.0f}%" if volume is not None else ""
-        self.query_one("#np-title", Label).update(f"{state}: {title.label()}")
-        self.query_one("#np-meta", Label).update(
-            f"Queue {queue.label()}{vol} · Space pause · n/b next/prev"
+        self._set_title(f"{state}: {title.label()}")
+        self._set_meta(
+            f"{queue.label()}{vol} · Space pause · n/b next/prev · u Up next"
         )
-        self.query_one("#np-time", Label).update(
-            f"{_fmt_time(position)} / {_fmt_time(duration)}"
-        )
-        bar = self.query_one("#np-bar", ProgressBar)
+        self._set_time(f"{_fmt_time(position)} / {_fmt_time(duration)}")
         if duration and duration > 0 and position is not None:
-            bar.update(progress=min(1000, int((position / duration) * 1000)))
+            self._set_bar(min(1000, int((position / duration) * 1000)))
         else:
-            bar.update(progress=0)
+            self._set_bar(0)
 
-        self.query_one("#np-queue-label", Label).update(
-            f"Queue · {queue.label()} · auto-advances on end (no wrap)"
-        )
-        self._render_queue(queue.tracks, current_index=queue.index)
+        # Queue panel: only when index / contents / expand mode change — never
+        # clear+rebuild a ListView on every progress tick (that caused the blink).
+        self._refresh_up_next(queue)
 
-    def _render_queue(self, tracks: list[Track], *, current_index: int = -1) -> None:
-        view = self.query_one("#np-queue", ListView)
-        view.clear()
-        if not tracks:
-            view.append(ListItem(Label("Queue empty — play from search, artist, album, or last.")))
+    def _set_title(self, text: str) -> None:
+        if text == self._last_title:
             return
-        # Show a window around the current track so the list stays readable.
-        start = max(0, current_index - 2)
-        end = min(len(tracks), start + 8)
-        start = max(0, end - 8)
-        for i in range(start, end):
-            track = tracks[i]
-            marker = "▶ " if i == current_index else "  "
-            view.append(ListItem(Label(f"{marker}{i + 1}. {track.label()}")))
+        self._last_title = text
+        self.query_one("#np-title", Label).update(text)
+
+    def _set_meta(self, text: str) -> None:
+        if text == self._last_meta:
+            return
+        self._last_meta = text
+        self.query_one("#np-meta", Label).update(text)
+
+    def _set_time(self, text: str) -> None:
+        if text == self._last_time:
+            return
+        self._last_time = text
+        self.query_one("#np-time", Label).update(text)
+
+    def _set_bar(self, progress: int) -> None:
+        if progress == self._last_bar:
+            return
+        self._last_bar = progress
+        self.query_one("#np-bar", ProgressBar).update(progress=progress)
+
+    def _up_next_window(self, queue: PlayQueue) -> list[tuple[int, Track, bool]]:
+        """Rows to show: current (▶) plus a few upcoming. No past tracks."""
+        if not queue.tracks or queue.current is None:
+            return []
+        upcoming = self.EXPANDED_UPCOMING if self._expanded else self.COMPACT_UPCOMING
+        rows: list[tuple[int, Track, bool]] = [
+            (queue.index, queue.tracks[queue.index], True)
+        ]
+        for i in range(queue.index + 1, min(len(queue.tracks), queue.index + 1 + upcoming)):
+            rows.append((i, queue.tracks[i], False))
+        return rows
+
+    def _refresh_up_next(self, queue: PlayQueue) -> None:
+        rows = self._up_next_window(queue)
+        sig: tuple[Any, ...] = (
+            queue.index,
+            len(queue.tracks),
+            queue.source,
+            self._expanded,
+            tuple((i, t.id) for i, t, _ in rows),
+        )
+        if sig == self._last_queue_sig:
+            return
+        self._last_queue_sig = sig
+
+        mode = "expanded" if self._expanded else "compact"
+        remaining = queue.remaining()
+        if not rows:
+            label = "Up next"
+            body = "Queue empty — play from search, artist, album, or last."
+        else:
+            more = max(0, remaining - (len(rows) - 1))
+            extra = f" · +{more} more" if more else ""
+            label = f"Up next · {queue.label()} · {mode}{extra} · u toggle"
+            lines: list[str] = []
+            for i, track, is_current in rows:
+                marker = "▶" if is_current else " "
+                lines.append(f"{marker} {i + 1}. {track.label()}")
+            body = "\n".join(lines)
+
+        self.query_one("#np-queue-label", Label).update(label)
+        self.query_one("#np-upnext", Static).update(body)
 
 
 class SearchScreen(Screen):
@@ -896,6 +963,7 @@ class MelodifyApp(App[None]):
 
     BINDINGS = [
         Binding("q", "quit", "Quit"),
+        Binding("u", "toggle_up_next", "Up next"),
         Binding("p", "play_highlighted", "Play"),
         Binding("c", "continue_listening", "Continue"),
         Binding("space", "toggle_pause", "Pause"),
@@ -1115,7 +1183,21 @@ class MelodifyApp(App[None]):
             volume=status.volume,
         )
 
+    def action_toggle_up_next(self) -> None:
+        try:
+            chrome = self.screen.query_one("#player-chrome", PlayerChrome)
+        except Exception:
+            return
+        expanded = chrome.toggle_expanded()
+        self.refresh_player_chrome()
+        self.notify(
+            "Up next: expanded" if expanded else "Up next: compact",
+            timeout=1.5,
+        )
+
     def _on_player_tick(self) -> None:
+        # Progress/time may update every tick; Up next only redraws when the
+        # queue signature changes (see PlayerChrome._refresh_up_next).
         self.refresh_player_chrome()
         self._maybe_prefetch_queue()
         self._watch_playback_end()

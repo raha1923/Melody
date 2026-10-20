@@ -184,12 +184,12 @@ Melodify’s PWA “recently listened” list is **offline** (local Redux/Indexe
 
 ```
 ┌ Browse (search / lists)     │ Now playing + progress bar     ┐
-│ Songs · Artists · Albums    │ Queue (▶ current, upcoming)    │
-│ Last played                 │ Space pause · n/b next/prev    │
+│ Songs · Artists · Albums    │ Up next (▶ current + a few)    │
+│ Last played                 │ Space pause · n/b · u expand   │
 └─────────────────────────────┴────────────────────────────────┘
 ```
 
-Right pane updates from mpv IPC ~2×/sec while a track is playing.
+Progress/time refresh from mpv IPC ~5×/sec. The **Up next** panel is compact by default and only redraws when the queue index or contents change (not on every tick — that used to blink). Press `u` to expand/collapse upcoming rows.
 
 ### TUI keys
 
@@ -207,6 +207,7 @@ Right pane updates from mpv IPC ~2×/sec while a track is playing.
 | Space | Pause / resume (mpv IPC) |
 | `n` / `>` | Next in queue |
 | `b` / `<` | Previous in queue |
+| `u` | Toggle Up next compact ↔ expanded |
 | `←` / `→` | Seek −5s / +5s |
 | Shift+`←` / `→` | Seek −10s / +10s |
 | `-` / `=` | Volume down / up |
@@ -262,6 +263,7 @@ When you play a song from **search results**, **artist tracks**, **album tracks*
 - **No wrap** at the edges — next at the end / prev at the start is a no-op (with a short notice).
 - When the current track ends, Melodify **auto-advances** to the next queue item if one exists.
 - If more Melodify pages exist for that list, they are pulled into the queue automatically when you get close to the end.
+- The right pane shows a quiet **Up next** strip (current + a few upcoming), not a full flashing queue list. `u` expands it.
 
 ### CLI playback controls
 

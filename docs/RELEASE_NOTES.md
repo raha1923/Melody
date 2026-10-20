@@ -3,6 +3,12 @@
 Copy this into the GitHub/Origin release body (or keep it updated before tagging).
 The release workflow attaches `dist/*.whl` and `dist/*.tar.gz` when a `v*` tag is pushed on GitHub.
 
+## v0.2.1
+
+### Fixes
+
+- **Queue panel blink** — Up next no longer rebuilds on every ~200ms IPC tick. Progress/time still update; the compact Up next strip redraws only when queue index/contents change. Press `u` to expand/collapse.
+
 ## v0.2.0
 
 ### Fixes
