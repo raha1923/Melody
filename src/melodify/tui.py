@@ -87,23 +87,65 @@ class AlbumSelected(Message):
 class SelectableList(ListView):
     """ListView that posts domain selection messages."""
 
+    BINDINGS = [
+        *ListView.BINDINGS,
+        Binding("pageup", "page_up", "Page up", show=False),
+        Binding("pagedown", "page_down", "Page down", show=False),
+        Binding("home", "scroll_home", "Top", show=False),
+        Binding("end", "scroll_end", "Bottom", show=False),
+        Binding("j", "cursor_down", "Down", show=False),
+        Binding("k", "cursor_up", "Up", show=False),
+    ]
+
     def __init__(self, kind: str, *, source: str = "", **kwargs) -> None:
         super().__init__(**kwargs)
         self.kind = kind
         self.source = source
         self._items: list[Artist | Album | Track] = []
 
-    def set_items(self, items: list[Artist | Album | Track]) -> None:
+    def set_items(
+        self,
+        items: list[Artist | Album | Track],
+        *,
+        focus: bool = False,
+    ) -> None:
         self._items = list(items)
         self.clear()
         if not items:
             self.append(ListItem(Label("Nothing here yet.")))
+            self.index = None
             return
         for item in items:
             self.append(ListItem(Label(item.label())))
+        self.index = 0
+        self.scroll_home(animate=False)
+        if focus:
+            self.focus()
 
     def track_items(self) -> list[Track]:
         return [item for item in self._items if isinstance(item, Track)]
+
+    def action_page_down(self) -> None:
+        if not self._items:
+            return
+        step = max(1, self.size.height - 1)
+        current = self.index if self.index is not None else 0
+        self.index = min(len(self._items) - 1, current + step)
+
+    def action_page_up(self) -> None:
+        if not self._items:
+            return
+        step = max(1, self.size.height - 1)
+        current = self.index if self.index is not None else 0
+        self.index = max(0, current - step)
+
+    def action_scroll_home(self) -> None:
+        if self._items:
+            self.index = 0
+
+    def action_scroll_end(self) -> None:
+        if self._items:
+            self.index = len(self._items) - 1
 
     def on_list_view_selected(self, event: ListView.Selected) -> None:
         index = event.list_view.index
@@ -129,8 +171,9 @@ class PlayerChrome(Vertical):
 
     DEFAULT_CSS = """
     PlayerChrome {
-        height: 14;
-        border-top: tall #334155;
+        height: 1fr;
+        width: 1fr;
+        border-left: tall #334155;
         background: #0f172a;
         padding: 0 1;
     }
@@ -346,7 +389,7 @@ class SearchScreen(Screen):
         def apply() -> None:
             last_list = self.query_one("#last-list", SelectableList)
             last_list.source = history.describe_source()
-            last_list.set_items(history.tracks)
+            last_list.set_items(history.tracks, focus=not silent)
             try:
                 tabs = self.query_one("#results-tabs", TabbedContent)
                 tabs.active = "tab-last"
@@ -362,7 +405,7 @@ class SearchScreen(Screen):
                 self.set_loading(
                     False,
                     f"{len(history.tracks)} tracks from {history.describe_source()}. "
-                    "Enter plays · c continues the first.",
+                    "↑↓/PgUp/PgDn scroll · Enter plays · c continues the first.",
                 )
 
         _call_ui(self, apply)
@@ -381,7 +424,8 @@ class SearchScreen(Screen):
             return
 
         def apply() -> None:
-            self.query_one("#track-list", SelectableList).set_items(results.tracks)
+            tracks = self.query_one("#track-list", SelectableList)
+            tracks.set_items(results.tracks, focus=bool(results.tracks))
             self.query_one("#artist-list", SelectableList).set_items(results.artists)
             self.query_one("#album-list", SelectableList).set_items(results.albums)
             total = len(results.tracks) + len(results.artists) + len(results.albums)
@@ -391,7 +435,7 @@ class SearchScreen(Screen):
                 self.set_loading(
                     False,
                     f"Found {len(results.tracks)} songs, {len(results.artists)} artists, "
-                    f"{len(results.albums)} albums. Enter opens · p plays · fills queue.",
+                    f"{len(results.albums)} albums. ↑↓/PgUp/PgDn scroll · Enter opens · p plays.",
                 )
             try:
                 tabs = self.query_one("#results-tabs", TabbedContent)
@@ -452,8 +496,10 @@ class ArtistScreen(Screen):
         _call_ui(self, self._set_status, "Fetching artist catalog…", loading=True)
         try:
             artist = app.client.get_artist(self.artist.id)
-            tracks, _ = app.client.get_artist_tracks(self.artist.id, sort_by="popular")
-            albums, _ = app.client.get_artist_albums(self.artist.id)
+            tracks = app.client.get_artist_tracks_all(
+                self.artist.id, sort_by="popular"
+            )
+            albums = app.client.get_artist_albums_all(self.artist.id)
         except MelodifyAPIError as exc:
             _call_ui(self, self._set_status, f"Could not load artist: {exc}", loading=False)
             return
@@ -462,13 +508,15 @@ class ArtistScreen(Screen):
             self.artist = artist
             self.query_one("#detail-title", Label).update(artist.name)
             self.query_one("#detail-meta", Label).update(artist.label())
-            self.query_one("#artist-track-list", SelectableList).set_items(tracks)
+            track_list = self.query_one("#artist-track-list", SelectableList)
+            track_list.set_items(tracks, focus=bool(tracks))
             self.query_one("#artist-album-list", SelectableList).set_items(albums)
             if not tracks and not albums:
                 self._set_status("This artist has no songs or albums available.", loading=False)
             else:
                 self._set_status(
-                    f"{len(tracks)} songs · {len(albums)} albums. Enter plays · fills queue.",
+                    f"{len(tracks)} songs · {len(albums)} albums. "
+                    "↑↓/PgUp/PgDn scroll · Enter plays · fills queue.",
                     loading=False,
                 )
 
@@ -516,18 +564,20 @@ class AlbumScreen(Screen):
         assert isinstance(app, MelodifyApp)
         _call_ui(self, self._set_status, "Fetching album tracks…", loading=True)
         try:
-            tracks, _ = app.client.get_album_tracks(self.album.id)
+            tracks = app.client.get_album_tracks_all(self.album.id)
         except MelodifyAPIError as exc:
             _call_ui(self, self._set_status, f"Could not load album: {exc}", loading=False)
             return
 
         def apply() -> None:
-            self.query_one("#album-track-list", SelectableList).set_items(tracks)
+            self.query_one("#album-track-list", SelectableList).set_items(
+                tracks, focus=bool(tracks)
+            )
             if not tracks:
                 self._set_status("This album has no playable tracks.", loading=False)
             else:
                 self._set_status(
-                    f"{len(tracks)} tracks. Enter or p plays · fills queue.",
+                    f"{len(tracks)} tracks. ↑↓/PgUp/PgDn scroll · Enter or p plays.",
                     loading=False,
                 )
 
@@ -579,13 +629,28 @@ class MelodifyApp(App[None]):
         color: #94a3b8;
         margin: 0 1 1 1;
     }
+    #results-tabs, #browse-pane TabbedContent {
+        height: 1fr;
+    }
+    TabPane {
+        height: 1fr;
+        layout: vertical;
+    }
     #browse-pane ListView {
         height: 1fr;
         border: tall #1e293b;
         margin: 0 1 1 1;
+        overflow-y: auto;
+        scrollbar-size-vertical: 1;
+    }
+    #player-chrome {
+        width: 2fr;
+        height: 1fr;
+        min-width: 28;
     }
     ListItem {
         padding: 0 1;
+        height: 1;
     }
     ListItem.--highlight {
         background: #1d4ed8;

@@ -124,21 +124,22 @@ def main(argv: list[str] | None = None) -> int:
                 return 0
             if command == "artist":
                 artist = client.get_artist(args.artist_id)
-                tracks, _ = client.get_artist_tracks(args.artist_id)
-                albums, _ = client.get_artist_albums(args.artist_id)
+                tracks = client.get_artist_tracks_all(args.artist_id)
+                albums = client.get_artist_albums_all(args.artist_id)
                 print(artist.label())
-                print("\nSongs:")
-                for track in tracks[:25]:
+                print(f"\nSongs ({len(tracks)}):")
+                for track in tracks:
                     print(f"  [{track.id}] {track.label()}")
-                print("\nAlbums:")
-                for album in albums[:25]:
+                print(f"\nAlbums ({len(albums)}):")
+                for album in albums:
                     print(f"  [{album.id}] {album.label()}")
                 return 0
             if command == "album":
-                tracks, _ = client.get_album_tracks(args.album_id)
+                tracks = client.get_album_tracks_all(args.album_id)
                 if not tracks:
                     print("No tracks on this album.")
                     return 0
+                print(f"{len(tracks)} tracks:")
                 for track in tracks:
                     print(f"[{track.id}] {track.label()}")
                 return 0

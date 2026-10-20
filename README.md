@@ -108,6 +108,9 @@ Right pane updates from mpv IPC ~2×/sec while a track is playing.
 |---|---|
 | `/` | Focus search |
 | Enter | Search / open / play highlighted song |
+| ↑ / ↓ / `j` `k` | Move highlight in the focused list |
+| PgUp / PgDn | Jump by page in long lists |
+| Home / End | Jump to first / last list item |
 | `c` | Continue listening (local recent first) |
 | `l` | Load last-played list (local recent first) |
 | `p` | Play highlighted song |
@@ -120,6 +123,10 @@ Right pane updates from mpv IPC ~2×/sec while a track is playing.
 | `s` | Stop playback |
 | Backspace | Go back |
 | `q` | Quit |
+
+### Long lists / pagination
+
+Melodify’s API returns about **40 items per page**. The client automatically fetches further pages (artist songs/albums, album tracks, most-listened) up to 500 items so the TUI list contains the full catalog, not just the first page. Use ↑↓ / PgUp/PgDn (or `j`/`k`) once the list is focused to reach items below the fold.
 
 ### Play queue
 
