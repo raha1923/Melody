@@ -9,6 +9,7 @@ from .config import load_settings
 from .models import Track
 from .controls import interactive_playback_loop
 from .history import resolve_listening_history
+from .mpris_bridge import MelodifyMpris, build_direct_actions
 from .player import PlayerError, StreamPlayer, detect_player
 from .progress import ProgressStore
 from .queue import PlayQueue
@@ -91,7 +92,17 @@ def main(argv: list[str] | None = None) -> int:
         help="Stream quality: 320, 160, or 96 (default from env)",
     )
 
+    sub.add_parser(
+        "doctor",
+        help="Check OS media integration (MPRIS / D-Bus / mpv) without needing .env.",
+    )
+
     args = parser.parse_args(argv)
+    command = args.command or "tui"
+
+    if command == "doctor":
+        return _run_doctor()
+
     settings = load_settings(args.env_file)
     missing = settings.missing()
     if missing:
@@ -102,8 +113,6 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 2
-
-    command = args.command or "tui"
     progress = ProgressStore()
     recent = RecentStore()
 
@@ -124,21 +133,22 @@ def main(argv: list[str] | None = None) -> int:
                 return 0
             if command == "artist":
                 artist = client.get_artist(args.artist_id)
-                tracks, _ = client.get_artist_tracks(args.artist_id)
-                albums, _ = client.get_artist_albums(args.artist_id)
+                tracks = client.get_artist_tracks_all(args.artist_id)
+                albums = client.get_artist_albums_all(args.artist_id)
                 print(artist.label())
-                print("\nSongs:")
-                for track in tracks[:25]:
+                print(f"\nSongs ({len(tracks)}):")
+                for track in tracks:
                     print(f"  [{track.id}] {track.label()}")
-                print("\nAlbums:")
-                for album in albums[:25]:
+                print(f"\nAlbums ({len(albums)}):")
+                for album in albums:
                     print(f"  [{album.id}] {album.label()}")
                 return 0
             if command == "album":
-                tracks, _ = client.get_album_tracks(args.album_id)
+                tracks = client.get_album_tracks_all(args.album_id)
                 if not tracks:
                     print("No tracks on this album.")
                     return 0
+                print(f"{len(tracks)} tracks:")
                 for track in tracks:
                     print(f"[{track.id}] {track.label()}")
                 return 0
@@ -281,6 +291,8 @@ def _stream_queue(
         )
         recent.upsert(current, position_seconds=pos)
 
+    mpris = MelodifyMpris()
+
     def _play_track(track: Track, *, seek: float = 0.0) -> None:
         url = client.build_play_url(track, quality=quality)
         client.record_listen(track)
@@ -294,18 +306,39 @@ def _stream_queue(
             http_headers=headers,
             start_seconds=seek,
         )
+        mpris.notify(title=True, playpause=True)
+
+    mpris.attach(
+        player=player,
+        queue=queue,
+        get_track=lambda: queue.current,
+        actions=build_direct_actions(
+            player,
+            queue,
+            play_track=lambda track: _play_track(track, seek=0.0),
+        ),
+    )
+    if mpris.start():
+        print("OS media controls (MPRIS) enabled — playerctl -p Melodify …", flush=True)
+    elif mpris.last_error:
+        print(f"OS media controls off: {mpris.last_error}", flush=True)
 
     first = queue.current
     if first is None:
         print("Queue is empty.", file=sys.stderr)
+        mpris.stop()
         return 1
-    _play_track(first, seek=start_seconds)
-    interactive_playback_loop(
-        player,
-        on_position=_save_for_current,
-        queue=queue,
-        play_track=lambda track: _play_track(track, seek=0.0),
-    )
+    try:
+        _play_track(first, seek=start_seconds)
+        interactive_playback_loop(
+            player,
+            on_position=_save_for_current,
+            queue=queue,
+            play_track=lambda track: _play_track(track, seek=0.0),
+            on_tick=mpris.sync_from_player,
+        )
+    finally:
+        mpris.stop()
     current = queue.current
     if current is not None and not player.is_alive:
         pos = progress.get_position(current.id)
@@ -313,6 +346,38 @@ def _stream_queue(
         if pos is None or (duration and pos >= max(duration - 3, 1)):
             progress.clear_position(current.id)
     return 0
+
+
+def _run_doctor() -> int:
+    from .mpris_bridge import diagnose_os_media
+
+    print(f"Melodify {__version__} — OS media / environment check\n")
+    rows = diagnose_os_media()
+    width = max(len(name) for name, _, _ in rows)
+    failed = 0
+    for name, ok, detail in rows:
+        mark = "OK " if ok else "NO "
+        print(f"  [{mark}] {name:<{width}}  {detail}")
+        if not ok and name != "playerctl":
+            # playerctl is optional helper; other failures matter for MPRIS.
+            if name in {
+                "MELODIFY_MPRIS",
+                "mpris-server",
+                "PyGObject (gi)",
+                "D-Bus session",
+                "MPRIS publish",
+                "mpv",
+            }:
+                failed += 1
+    print(
+        "\nOn your Ubuntu desktop, with Melodify playing:\n"
+        "  playerctl -p Melodify status\n"
+        "  playerctl -p Melodify play-pause\n"
+        "  playerctl -p Melodify next\n"
+        "\nTip: create the venv with system GI bindings:\n"
+        "  python3 -m venv --system-site-packages .venv\n"
+    )
+    return 1 if failed else 0
 
 
 def _print_search(results) -> None:

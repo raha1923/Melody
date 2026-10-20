@@ -12,7 +12,8 @@ This is not a web app — no local HTTP server is started.
 
 ```bash
 sudo apt update
-sudo apt install -y python3 python3-pip python3-venv mpv
+sudo apt install -y python3 python3-pip python3-venv mpv \
+  python3-gi gir1.2-glib-2.0  # for OS media keys (MPRIS)
 ```
 
 ## Install / update
@@ -20,11 +21,13 @@ sudo apt install -y python3 python3-pip python3-venv mpv
 ```bash
 cd /path/to/this/repo
 git pull
-python3 -m venv .venv
+# --system-site-packages so PyGObject (apt python3-gi) is visible for MPRIS
+python3 -m venv --system-site-packages .venv
 source .venv/bin/activate
 pip install -e .
 # or, if already installed:
 # pip install -e . --force-reinstall --no-deps
+melodify doctor   # verifies OS media (MPRIS) wiring
 ```
 
 ## Configure
@@ -54,6 +57,7 @@ Optional:
 | `MELODIFY_PLATFORM` | `Linux-Desktop` |
 | `MELODIFY_STREAM_QUALITY` | `320` |
 | `MELODIFY_PLAYER` | `mpv` |
+| `MELODIFY_MPRIS` | `1` (set `0` to disable OS media controls) |
 
 **Never commit `.env`.** Tokens grant access to your Melodify account.
 
@@ -108,6 +112,10 @@ Right pane updates from mpv IPC ~2×/sec while a track is playing.
 |---|---|
 | `/` | Focus search |
 | Enter | Search / open / play highlighted song |
+| ↑ / ↓ / `j` `k` | Move highlight in the focused list |
+| PgUp / PgDn | Jump by page in long lists |
+| Home / End | Jump to first / last list item |
+| `m` / **Load more** | Fetch the next Melodify page into the focused list |
 | `c` | Continue listening (local recent first) |
 | `l` | Load last-played list (local recent first) |
 | `p` | Play highlighted song |
@@ -121,12 +129,49 @@ Right pane updates from mpv IPC ~2×/sec while a track is playing.
 | Backspace | Go back |
 | `q` | Quit |
 
+### OS media controls (MPRIS)
+
+Melodify already speaks the Linux media APIs: it publishes **MPRIS2** on the session D-Bus as `org.mpris.MediaPlayer2.Melodify` and installs `~/.local/share/applications/melodify.desktop`.
+
+That hooks into:
+
+- GNOME / KDE media popups (title, artist, artwork)
+- Keyboard media keys (play/pause, next, previous)
+- `playerctl` and other MPRIS clients (seek + volume when using `mpv`)
+
+```bash
+# while Melodify is running on your desktop:
+playerctl -p Melodify status
+playerctl -p Melodify play-pause
+playerctl -p Melodify next
+
+# offline check (no Melodify account needed):
+melodify doctor
+```
+
+Needs: `python3-gi`, `gir1.2-glib-2.0`, a real desktop session bus, and `mpris-server` (pulled in by `pip install -e .`). Use a venv with `--system-site-packages` so `gi` imports. Set `MELODIFY_MPRIS=0` to disable.
+
+### Long lists / pagination
+
+Melodify’s API returns about **40 items per page**. The client automatically fetches further pages (artist songs/albums, album tracks, most-listened) up to 500 items so the TUI list contains the full catalog, not just the first page. Use ↑↓ / PgUp/PgDn (or `j`/`k`) once the list is focused to reach items below the fold.
+
+### Pagination / Load more
+
+Melodify APIs return pages (~40 tracks). The TUI loads the first page, then:
+
+- Scroll onto the bottom **── Load more (m) ──** row, press **`m`**, **PgDn/End** at the bottom, or click **Load more**
+- New rows **append** (already-loaded tracks stay)
+- Playing from a list uses the **full loaded set** as the queue; near the end of the queue Melodify **prefetches** the next page when the API still has more (`end: false`)
+
+Applies to: search Songs/Artists/Albums, artist Songs/Albums, album tracks, and online last-played (local recent is already complete).
+
 ### Play queue
 
 When you play a song from **search results**, **artist tracks**, **album tracks**, or **last played**, that list becomes the in-memory queue and playback starts at the selected item. Continue listening loads the preferred history list (local recent, else online) as the queue.
 
 - **No wrap** at the edges — next at the end / prev at the start is a no-op (with a short notice).
 - When the current track ends, Melodify **auto-advances** to the next queue item if one exists.
+- If more Melodify pages exist for that list, they are pulled into the queue automatically when you get close to the end.
 
 ### CLI playback controls
 

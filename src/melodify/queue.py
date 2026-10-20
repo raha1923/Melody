@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Any
 
 from .models import Track
 
@@ -12,11 +13,14 @@ class PlayQueue:
     tracks: list[Track] = field(default_factory=list)
     index: int = 0
     source: str = ""
+    # Optional Melodify ListPager[Track] so we can prefetch more pages near the end.
+    pager: Any | None = None
 
     def clear(self) -> None:
         self.tracks = []
         self.index = 0
         self.source = ""
+        self.pager = None
 
     @property
     def current(self) -> Track | None:
@@ -46,6 +50,7 @@ class PlayQueue:
         cleaned = [t for t in tracks if isinstance(t, Track)]
         self.tracks = cleaned
         self.source = source
+        self.pager = None
         if not cleaned:
             self.index = 0
             return None
@@ -65,6 +70,23 @@ class PlayQueue:
         else:
             self.index = 0
         return self.current
+
+    def remaining(self) -> int:
+        if not self.tracks:
+            return 0
+        return max(0, len(self.tracks) - self.index - 1)
+
+    def extend_unique(self, tracks: list[Track]) -> int:
+        """Append tracks not already in the queue. Returns how many were added."""
+        seen = {t.id for t in self.tracks}
+        added = 0
+        for track in tracks:
+            if track.id in seen:
+                continue
+            self.tracks.append(track)
+            seen.add(track.id)
+            added += 1
+        return added
 
     def peek_next(self) -> Track | None:
         if self.index + 1 < len(self.tracks):

@@ -128,6 +128,10 @@ class MelodifyClient:
             raise last_error
         raise MelodifyAPIError("Request failed after retries.")
 
+    # Melodify returns ~40 items per page; keep a hard cap so a huge catalog
+    # cannot hang the TUI forever.
+    PAGE_FETCH_CAP = 500
+
     def search(self, query: str, *, search_type: int = 6, offset: int = 0) -> SearchResults:
         payload = self._request(
             "POST",
@@ -135,6 +139,56 @@ class MelodifyClient:
             json={"q": query, "type": search_type, "offset": offset},
         )
         return parse_search_result(payload)
+
+    def search_all(
+        self,
+        query: str,
+        *,
+        search_type: int = 6,
+        max_items: int | None = None,
+    ) -> SearchResults:
+        """Paginate search until ``end`` (or ``max_items``). Mixed-type search
+        merges pages for tracks/artists/albums independently by list length.
+        """
+        cap = max_items if max_items is not None else self.PAGE_FETCH_CAP
+        first = self.search(query, search_type=search_type, offset=0)
+        if first.end or search_type == 6:
+            # Type 6 (all) pages are awkward to continue by a single offset;
+            # one page is enough for the home search UX.
+            return first
+        tracks = list(first.tracks)
+        artists = list(first.artists)
+        albums = list(first.albums)
+        offset = len(tracks) or len(artists) or len(albums)
+        end = first.end
+        while not end and offset < cap:
+            page = self.search(query, search_type=search_type, offset=offset)
+            if search_type == 1:
+                if not page.tracks:
+                    break
+                tracks.extend(page.tracks)
+                offset = len(tracks)
+            elif search_type == 2:
+                if not page.artists:
+                    break
+                artists.extend(page.artists)
+                offset = len(artists)
+            elif search_type == 3:
+                if not page.albums:
+                    break
+                albums.extend(page.albums)
+                offset = len(albums)
+            else:
+                break
+            end = page.end
+            if len(page.tracks) + len(page.artists) + len(page.albums) == 0:
+                break
+        return SearchResults(
+            artists=artists[:cap],
+            albums=albums[:cap],
+            tracks=tracks[:cap],
+            end=end or (len(tracks) + len(artists) + len(albums) >= cap),
+        )
 
     def get_artist(self, artist_id: int) -> Artist:
         payload = self._request(
@@ -167,6 +221,20 @@ class MelodifyClient:
         ]
         return tracks, bool(result.get("end", True))
 
+    def get_artist_tracks_all(
+        self,
+        artist_id: int,
+        *,
+        sort_by: str = "popular",
+        max_items: int | None = None,
+    ) -> list[Track]:
+        return self._paginate_tracks(
+            lambda offset: self.get_artist_tracks(
+                artist_id, offset=offset, sort_by=sort_by
+            ),
+            max_items=max_items,
+        )
+
     def get_artist_albums(
         self, artist_id: int, *, offset: int = 0
     ) -> tuple[list[Album], bool]:
@@ -182,6 +250,29 @@ class MelodifyClient:
             if a is not None
         ]
         return albums, bool(result.get("end", True))
+
+    def get_artist_albums_all(
+        self, artist_id: int, *, max_items: int | None = None
+    ) -> list[Album]:
+        cap = max_items if max_items is not None else self.PAGE_FETCH_CAP
+        all_albums: list[Album] = []
+        offset = 0
+        seen: set[int] = set()
+        while offset < cap:
+            page, end = self.get_artist_albums(artist_id, offset=offset)
+            if not page:
+                break
+            for album in page:
+                if album.id in seen:
+                    continue
+                seen.add(album.id)
+                all_albums.append(album)
+                if len(all_albums) >= cap:
+                    return all_albums
+            offset += len(page)
+            if end:
+                break
+        return all_albums
 
     def get_album_tracks(
         self, album_id: int, *, offset: int = 0
@@ -199,6 +290,14 @@ class MelodifyClient:
         ]
         return tracks, bool(result.get("end", True))
 
+    def get_album_tracks_all(
+        self, album_id: int, *, max_items: int | None = None
+    ) -> list[Track]:
+        return self._paginate_tracks(
+            lambda offset: self.get_album_tracks(album_id, offset=offset),
+            max_items=max_items,
+        )
+
     def get_most_listened_tracks(
         self, *, offset: int = 0
     ) -> tuple[list[Track], bool]:
@@ -214,6 +313,41 @@ class MelodifyClient:
             if t is not None
         ]
         return tracks, bool(result.get("end", True))
+
+    def get_most_listened_tracks_all(
+        self, *, max_items: int | None = None
+    ) -> list[Track]:
+        return self._paginate_tracks(
+            lambda offset: self.get_most_listened_tracks(offset=offset),
+            max_items=max_items,
+        )
+
+    def _paginate_tracks(
+        self,
+        fetch_page,
+        *,
+        max_items: int | None = None,
+    ) -> list[Track]:
+        """Walk Melodify ``offset`` pages until ``end`` or empty/cap."""
+        cap = max_items if max_items is not None else self.PAGE_FETCH_CAP
+        all_tracks: list[Track] = []
+        offset = 0
+        seen: set[int] = set()
+        while offset < cap:
+            page, end = fetch_page(offset)
+            if not page:
+                break
+            for track in page:
+                if track.id in seen:
+                    continue
+                seen.add(track.id)
+                all_tracks.append(track)
+                if len(all_tracks) >= cap:
+                    return all_tracks
+            offset += len(page)
+            if end:
+                break
+        return all_tracks
 
     def get_playlist_tracks_by_type(
         self, playlist_type: str, *, offset: int = 0
