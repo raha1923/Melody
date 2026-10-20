@@ -1,0 +1,461 @@
+from __future__ import annotations
+
+from textual.app import App, ComposeResult
+from textual.binding import Binding
+from textual.containers import Horizontal, Vertical
+from textual.message import Message
+from textual.reactive import reactive
+from textual.screen import Screen
+from textual.widgets import (
+    Button,
+    Footer,
+    Header,
+    Input,
+    Label,
+    ListItem,
+    ListView,
+    LoadingIndicator,
+    Static,
+    TabbedContent,
+    TabPane,
+)
+
+from .api import MelodifyAPIError, MelodifyClient
+from .config import Settings
+from .models import Album, Artist, Track
+from .player import PlayerError, StreamPlayer
+
+
+def _status_line(text: str, *, tone: str = "dim") -> Static:
+    return Static(text, classes=f"status status-{tone}", id="status")
+
+
+class TrackSelected(Message):
+    def __init__(self, track: Track) -> None:
+        self.track = track
+        super().__init__()
+
+
+class ArtistSelected(Message):
+    def __init__(self, artist: Artist) -> None:
+        self.artist = artist
+        super().__init__()
+
+
+class AlbumSelected(Message):
+    def __init__(self, album: Album) -> None:
+        self.album = album
+        super().__init__()
+
+
+class SelectableList(ListView):
+    """ListView that posts domain selection messages."""
+
+    def __init__(self, kind: str, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.kind = kind
+        self._items: list[Artist | Album | Track] = []
+
+    def set_items(self, items: list[Artist | Album | Track]) -> None:
+        self._items = list(items)
+        self.clear()
+        if not items:
+            self.append(ListItem(Label("Nothing here yet.")))
+            return
+        for item in items:
+            self.append(ListItem(Label(item.label())))
+
+    def on_list_view_selected(self, event: ListView.Selected) -> None:
+        index = event.list_view.index
+        if index is None or index < 0 or index >= len(self._items):
+            return
+        item = self._items[index]
+        if self.kind == "track" and isinstance(item, Track):
+            self.post_message(TrackSelected(item))
+        elif self.kind == "artist" and isinstance(item, Artist):
+            self.post_message(ArtistSelected(item))
+        elif self.kind == "album" and isinstance(item, Album):
+            self.post_message(AlbumSelected(item))
+
+
+class SearchScreen(Screen):
+    BINDINGS = [
+        Binding("slash", "focus_search", "Search", show=True),
+        Binding("escape", "clear_status", "Clear", show=False),
+    ]
+
+    status_text = reactive("Type a query and press Enter to search Melodify.")
+
+    def compose(self) -> ComposeResult:
+        yield Header(show_clock=False)
+        with Vertical(id="search-layout"):
+            yield Label("Melodify", id="brand")
+            yield Label("Search artists, albums, and songs from your terminal.", id="tagline")
+            yield Input(
+                placeholder="Search Melodify…",
+                id="search-input",
+            )
+            yield Static(self.status_text, id="status")
+            yield LoadingIndicator(id="loading")
+            with TabbedContent(id="results-tabs"):
+                with TabPane("Songs", id="tab-tracks"):
+                    yield SelectableList("track", id="track-list")
+                with TabPane("Artists", id="tab-artists"):
+                    yield SelectableList("artist", id="artist-list")
+                with TabPane("Albums", id="tab-albums"):
+                    yield SelectableList("album", id="album-list")
+        yield Footer()
+
+    def on_mount(self) -> None:
+        self.query_one("#loading", LoadingIndicator).display = False
+        self.query_one("#search-input", Input).focus()
+
+    def watch_status_text(self, value: str) -> None:
+        try:
+            self.query_one("#status", Static).update(value)
+        except Exception:
+            pass
+
+    def action_focus_search(self) -> None:
+        self.query_one("#search-input", Input).focus()
+
+    def action_clear_status(self) -> None:
+        self.status_text = "Ready."
+
+    def set_loading(self, loading: bool, message: str | None = None) -> None:
+        self.query_one("#loading", LoadingIndicator).display = loading
+        if message is not None:
+            self.status_text = message
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        query = event.value.strip()
+        if not query:
+            self.status_text = "Enter a search term first."
+            return
+        self.run_worker(self._do_search(query), exclusive=True, thread=True)
+
+    def _do_search(self, query: str) -> None:
+        app = self.app
+        assert isinstance(app, MelodifyApp)
+        self.call_from_thread(self.set_loading, True, f'Searching for “{query}”…')
+        try:
+            results = app.client.search(query)
+        except MelodifyAPIError as exc:
+            self.call_from_thread(self.set_loading, False, f"Search failed: {exc}")
+            return
+        except Exception as exc:  # noqa: BLE001 — surface unexpected errors in TUI
+            self.call_from_thread(self.set_loading, False, f"Unexpected error: {exc}")
+            return
+
+        def apply() -> None:
+            self.query_one("#track-list", SelectableList).set_items(results.tracks)
+            self.query_one("#artist-list", SelectableList).set_items(results.artists)
+            self.query_one("#album-list", SelectableList).set_items(results.albums)
+            total = len(results.tracks) + len(results.artists) + len(results.albums)
+            if total == 0:
+                self.set_loading(False, f'No results for “{query}”. Try another spelling.')
+            else:
+                self.set_loading(
+                    False,
+                    f"Found {len(results.tracks)} songs, {len(results.artists)} artists, "
+                    f"{len(results.albums)} albums. Enter opens · p plays song.",
+                )
+
+        self.call_from_thread(apply)
+
+
+class ArtistScreen(Screen):
+    def __init__(self, artist: Artist) -> None:
+        super().__init__()
+        self.artist = artist
+
+    def compose(self) -> ComposeResult:
+        yield Header(show_clock=False)
+        with Vertical(id="detail-layout"):
+            yield Label(self.artist.name, id="detail-title")
+            yield Label(self.artist.label(), id="detail-meta")
+            yield Static("Loading artist…", id="status")
+            yield LoadingIndicator(id="loading")
+            with Horizontal(id="detail-actions"):
+                yield Button("Back", id="btn-back", variant="default")
+                yield Button("Refresh", id="btn-refresh", variant="primary")
+            with TabbedContent():
+                with TabPane("Songs", id="tab-artist-tracks"):
+                    yield SelectableList("track", id="artist-track-list")
+                with TabPane("Albums", id="tab-artist-albums"):
+                    yield SelectableList("album", id="artist-album-list")
+        yield Footer()
+
+    def on_mount(self) -> None:
+        self.run_worker(self._load(), exclusive=True, thread=True)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "btn-back":
+            self.app.pop_screen()
+        elif event.button.id == "btn-refresh":
+            self.run_worker(self._load(), exclusive=True, thread=True)
+
+    def _set_status(self, text: str, *, loading: bool = False) -> None:
+        self.query_one("#status", Static).update(text)
+        self.query_one("#loading", LoadingIndicator).display = loading
+
+    def _load(self) -> None:
+        app = self.app
+        assert isinstance(app, MelodifyApp)
+        self.call_from_thread(self._set_status, "Fetching artist catalog…", loading=True)
+        try:
+            artist = app.client.get_artist(self.artist.id)
+            tracks, _ = app.client.get_artist_tracks(self.artist.id, sort_by="popular")
+            albums, _ = app.client.get_artist_albums(self.artist.id)
+        except MelodifyAPIError as exc:
+            self.call_from_thread(self._set_status, f"Could not load artist: {exc}", loading=False)
+            return
+
+        def apply() -> None:
+            self.artist = artist
+            self.query_one("#detail-title", Label).update(artist.name)
+            self.query_one("#detail-meta", Label).update(artist.label())
+            self.query_one("#artist-track-list", SelectableList).set_items(tracks)
+            self.query_one("#artist-album-list", SelectableList).set_items(albums)
+            if not tracks and not albums:
+                self._set_status("This artist has no songs or albums available.", loading=False)
+            else:
+                self._set_status(
+                    f"{len(tracks)} songs · {len(albums)} albums. Enter to open · p to play.",
+                    loading=False,
+                )
+
+        self.call_from_thread(apply)
+
+
+class AlbumScreen(Screen):
+    def __init__(self, album: Album) -> None:
+        super().__init__()
+        self.album = album
+
+    def compose(self) -> ComposeResult:
+        yield Header(show_clock=False)
+        with Vertical(id="detail-layout"):
+            yield Label(self.album.title, id="detail-title")
+            yield Label(self.album.label(), id="detail-meta")
+            yield Static("Loading album…", id="status")
+            yield LoadingIndicator(id="loading")
+            with Horizontal(id="detail-actions"):
+                yield Button("Back", id="btn-back", variant="default")
+                yield Button("Refresh", id="btn-refresh", variant="primary")
+            yield SelectableList("track", id="album-track-list")
+        yield Footer()
+
+    def on_mount(self) -> None:
+        self.run_worker(self._load(), exclusive=True, thread=True)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "btn-back":
+            self.app.pop_screen()
+        elif event.button.id == "btn-refresh":
+            self.run_worker(self._load(), exclusive=True, thread=True)
+
+    def _set_status(self, text: str, *, loading: bool = False) -> None:
+        self.query_one("#status", Static).update(text)
+        self.query_one("#loading", LoadingIndicator).display = loading
+
+    def _load(self) -> None:
+        app = self.app
+        assert isinstance(app, MelodifyApp)
+        self.call_from_thread(self._set_status, "Fetching album tracks…", loading=True)
+        try:
+            tracks, _ = app.client.get_album_tracks(self.album.id)
+        except MelodifyAPIError as exc:
+            self.call_from_thread(self._set_status, f"Could not load album: {exc}", loading=False)
+            return
+
+        def apply() -> None:
+            self.query_one("#album-track-list", SelectableList).set_items(tracks)
+            if not tracks:
+                self._set_status("This album has no playable tracks.", loading=False)
+            else:
+                self._set_status(
+                    f"{len(tracks)} tracks. Press Enter or p to stream one.",
+                    loading=False,
+                )
+
+        self.call_from_thread(apply)
+
+
+class MelodifyApp(App[None]):
+    TITLE = "Melodify"
+    SUB_TITLE = "terminal client"
+    CSS = """
+    Screen {
+        background: #0b1020;
+        color: #e8eefc;
+    }
+    #brand {
+        text-style: bold;
+        color: #7dd3fc;
+        margin: 1 1 0 1;
+        text-align: center;
+        width: 100%;
+    }
+    #tagline {
+        color: #94a3b8;
+        margin: 0 1 1 1;
+        text-align: center;
+        width: 100%;
+    }
+    #search-input {
+        margin: 0 1 1 1;
+    }
+    #status {
+        margin: 0 1 1 1;
+        color: #cbd5e1;
+    }
+    #loading {
+        margin: 0 1 1 1;
+        height: 1;
+    }
+    #detail-title {
+        text-style: bold;
+        color: #fde68a;
+        margin: 1 1 0 1;
+    }
+    #detail-meta {
+        color: #94a3b8;
+        margin: 0 1 1 1;
+    }
+    #detail-actions {
+        height: auto;
+        margin: 0 1 1 1;
+    }
+    ListView {
+        height: 1fr;
+        border: tall #1e293b;
+        margin: 0 1 1 1;
+    }
+    ListItem {
+        padding: 0 1;
+    }
+    ListItem.--highlight {
+        background: #1d4ed8;
+    }
+    Footer {
+        background: #111827;
+    }
+    Header {
+        background: #111827;
+        color: #e2e8f0;
+    }
+    """
+
+    BINDINGS = [
+        Binding("q", "quit", "Quit"),
+        Binding("p", "play_highlighted", "Play"),
+        Binding("s", "stop_playback", "Stop"),
+        Binding("backspace", "go_back", "Back"),
+    ]
+
+    def __init__(self, settings: Settings):
+        super().__init__()
+        self.settings = settings
+        self.client = MelodifyClient(settings)
+        self.player = StreamPlayer(preferred=settings.player)
+        self._last_track: Track | None = None
+
+    def on_mount(self) -> None:
+        self.push_screen(SearchScreen())
+        missing = self.settings.missing()
+        if missing:
+            self.notify(
+                "Missing env: " + ", ".join(missing),
+                severity="error",
+                timeout=8,
+            )
+
+    def on_unmount(self) -> None:
+        self.player.stop()
+        self.client.close()
+
+    def action_go_back(self) -> None:
+        if len(self.screen_stack) > 1:
+            self.pop_screen()
+
+    def action_stop_playback(self) -> None:
+        self.player.stop()
+        self.notify("Playback stopped.", timeout=2)
+
+    def action_play_highlighted(self) -> None:
+        track = self._highlighted_track()
+        if track is None:
+            if self._last_track is not None:
+                self._play_track(self._last_track)
+            else:
+                self.notify("Highlight a song first.", severity="warning")
+            return
+        self._play_track(track)
+
+    def on_track_selected(self, event: TrackSelected) -> None:
+        self._play_track(event.track)
+
+    def on_artist_selected(self, event: ArtistSelected) -> None:
+        self.push_screen(ArtistScreen(event.artist))
+
+    def on_album_selected(self, event: AlbumSelected) -> None:
+        self.push_screen(AlbumScreen(event.album))
+
+    def _highlighted_track(self) -> Track | None:
+        screen = self.screen
+        for list_id in (
+            "#track-list",
+            "#artist-track-list",
+            "#album-track-list",
+        ):
+            try:
+                widget = screen.query_one(list_id, SelectableList)
+            except Exception:
+                continue
+            if widget.kind != "track":
+                continue
+            index = widget.index
+            if index is None or index < 0 or index >= len(widget._items):
+                continue
+            item = widget._items[index]
+            if isinstance(item, Track):
+                return item
+        return None
+
+    def _play_track(self, track: Track) -> None:
+        self._last_track = track
+        self.run_worker(self._play_worker(track), exclusive=True, thread=True)
+
+    def _play_worker(self, track: Track) -> None:
+        title = track.label()
+        self.call_from_thread(self.notify, f"Starting stream: {track.title}", timeout=2)
+        try:
+            url = self.client.build_play_url(track)
+            headers = {
+                "authorization": self.settings.authorization,
+                "user-id": self.settings.user_id,
+                "device-id": self.settings.device_id,
+                "device-token": self.settings.device_token,
+                "Origin": self.settings.origin,
+                "Referer": f"{self.settings.origin}/",
+            }
+            self.player.play(url, title=title, http_headers=headers)
+        except (MelodifyAPIError, PlayerError) as exc:
+            self.call_from_thread(
+                self.notify,
+                f"Play failed: {exc}",
+                severity="error",
+                timeout=6,
+            )
+            return
+        backend = self.player.backend.name
+        self.call_from_thread(
+            self.notify,
+            f"Playing via {backend}: {track.title} — press s to stop",
+            timeout=4,
+        )
+
+
+def run_tui(settings: Settings) -> None:
+    MelodifyApp(settings).run()

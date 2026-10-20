@@ -1,0 +1,241 @@
+from __future__ import annotations
+
+import time
+from typing import Any
+from urllib.parse import urlencode
+
+import httpx
+
+from .config import Settings
+from .models import Album, Artist, SearchResults, Track, parse_search_result
+
+
+class MelodifyAPIError(RuntimeError):
+    def __init__(self, message: str, *, status_code: int | None = None):
+        super().__init__(message)
+        self.status_code = status_code
+
+
+class MelodifyClient:
+    """Thin HTTP client for Melodify desktop API + CDN play URLs."""
+
+    def __init__(self, settings: Settings, *, timeout: float = 45.0):
+        self.settings = settings
+        self._client = httpx.Client(
+            base_url=settings.api_base,
+            timeout=timeout,
+            headers=self._auth_headers(),
+            follow_redirects=True,
+        )
+
+    def close(self) -> None:
+        self._client.close()
+
+    def __enter__(self) -> MelodifyClient:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.close()
+
+    def _auth_headers(self) -> dict[str, str]:
+        s = self.settings
+        return {
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "authorization": s.authorization,
+            "user-id": s.user_id,
+            "device-id": s.device_id,
+            "device-token": s.device_token,
+            "device-name": s.device_name,
+            "platform": s.platform,
+            "app-version": s.app_version,
+            "pwa-version": s.pwa_version,
+            "Origin": s.origin,
+            "Referer": f"{s.origin}/",
+            "user-device-info": "screen_w:1280-screen_h:720-terminal:1",
+        }
+
+    def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        json: dict[str, Any] | None = None,
+        params: dict[str, Any] | None = None,
+        retries: int = 3,
+    ) -> dict[str, Any]:
+        last_error: Exception | None = None
+        for attempt in range(1, retries + 1):
+            try:
+                response = self._client.request(method, path, json=json, params=params)
+            except httpx.TimeoutException as exc:
+                last_error = MelodifyAPIError(
+                    "Request timed out. Melodify’s API is occasionally slow — try again."
+                )
+                if attempt < retries:
+                    time.sleep(0.6 * attempt)
+                    continue
+                raise last_error from exc
+            except httpx.HTTPError as exc:
+                raise MelodifyAPIError(f"Network error talking to Melodify: {exc}") from exc
+
+            if response.status_code >= 500:
+                last_error = MelodifyAPIError(
+                    f"Melodify server error ({response.status_code}). Try again shortly.",
+                    status_code=response.status_code,
+                )
+                if attempt < retries:
+                    time.sleep(0.6 * attempt)
+                    continue
+                raise last_error
+
+            if response.status_code in (401, 403):
+                raise MelodifyAPIError(
+                    "Auth rejected. Check MELODIFY_AUTHORIZATION / device headers in .env.",
+                    status_code=response.status_code,
+                )
+            if response.status_code >= 400:
+                raise MelodifyAPIError(
+                    f"API request failed ({response.status_code}): {response.text[:200]}",
+                    status_code=response.status_code,
+                )
+
+            try:
+                payload = response.json()
+            except ValueError as exc:
+                raise MelodifyAPIError("API returned a non-JSON response.") from exc
+
+            if isinstance(payload, dict) and payload.get("done") is False:
+                raise MelodifyAPIError(
+                    str(
+                        payload.get("message")
+                        or payload.get("error")
+                        or "API returned done=false"
+                    )
+                )
+            if not isinstance(payload, dict):
+                raise MelodifyAPIError("Unexpected API payload shape.")
+            return payload
+
+        if last_error:
+            raise last_error
+        raise MelodifyAPIError("Request failed after retries.")
+
+    def search(self, query: str, *, search_type: int = 6, offset: int = 0) -> SearchResults:
+        payload = self._request(
+            "POST",
+            "/search",
+            json={"q": query, "type": search_type, "offset": offset},
+        )
+        return parse_search_result(payload)
+
+    def get_artist(self, artist_id: int) -> Artist:
+        payload = self._request(
+            "GET",
+            "/getArtistData",
+            params={"artist_id": artist_id},
+        )
+        artist = Artist.from_dict((payload.get("result") or {}).get("artist"))
+        if not artist:
+            raise MelodifyAPIError(f"Artist {artist_id} not found.")
+        return artist
+
+    def get_artist_tracks(
+        self,
+        artist_id: int,
+        *,
+        offset: int = 0,
+        sort_by: str = "popular",
+    ) -> tuple[list[Track], bool]:
+        payload = self._request(
+            "POST",
+            "/getArtistTracks",
+            json={"artist_id": artist_id, "offset": offset, "sort_by": sort_by},
+        )
+        result = payload.get("result") or {}
+        tracks = [
+            t
+            for t in (Track.from_dict(raw) for raw in result.get("tracks") or [])
+            if t is not None
+        ]
+        return tracks, bool(result.get("end", True))
+
+    def get_artist_albums(
+        self, artist_id: int, *, offset: int = 0
+    ) -> tuple[list[Album], bool]:
+        payload = self._request(
+            "POST",
+            "/getArtistAlbums",
+            json={"artist_id": artist_id, "offset": offset},
+        )
+        result = payload.get("result") or {}
+        albums = [
+            a
+            for a in (Album.from_dict(raw) for raw in result.get("albums") or [])
+            if a is not None
+        ]
+        return albums, bool(result.get("end", True))
+
+    def get_album_tracks(
+        self, album_id: int, *, offset: int = 0
+    ) -> tuple[list[Track], bool]:
+        payload = self._request(
+            "POST",
+            "/getAlbumTracks",
+            json={"album_id": album_id, "offset": offset},
+        )
+        result = payload.get("result") or {}
+        tracks = [
+            t
+            for t in (Track.from_dict(raw) for raw in result.get("tracks") or [])
+            if t is not None
+        ]
+        return tracks, bool(result.get("end", True))
+
+    def build_play_url(self, track: Track, *, quality: str | None = None) -> str:
+        quality = quality or self.settings.stream_quality
+        path = track.stream_path(quality)
+        if not path:
+            raise MelodifyAPIError("This track has no streamable MP3 links.")
+
+        # API already returns absolute CDN handle URLs in mp3s[].name
+        query = urlencode(
+            {
+                "type": "pwa",
+                "melodify_token": self.settings.user_id,
+                "download_token": self.settings.authorization,
+            }
+        )
+        # PWA appends stamp without '=' — keep that quirk.
+        stamp = f"stamp{int(time.time() * 1000)}"
+        separator = "&" if "?" in path else "?"
+        return f"{path}{separator}{query}&{stamp}"
+
+    def resolve_stream_url(self, track: Track, *, quality: str | None = None) -> str:
+        """Resolve the 307 play handle to a final media URL without buffering audio."""
+        play_url = self.build_play_url(track, quality=quality)
+        headers = {
+            "authorization": self.settings.authorization,
+            "user-id": self.settings.user_id,
+            "device-id": self.settings.device_id,
+            "device-token": self.settings.device_token,
+            "device-name": self.settings.device_name,
+            "platform": self.settings.platform,
+            "app-version": self.settings.app_version,
+            "pwa-version": self.settings.pwa_version,
+            "Origin": self.settings.origin,
+            "Referer": f"{self.settings.origin}/",
+            "Range": "bytes=0-0",
+        }
+        try:
+            with httpx.Client(timeout=30.0, follow_redirects=True) as client:
+                response = client.head(play_url, headers=headers)
+                if response.status_code >= 400:
+                    # Some CDN nodes dislike HEAD; fall back to a tiny ranged GET.
+                    response = client.get(play_url, headers=headers)
+                if response.status_code < 400:
+                    return str(response.url)
+        except httpx.HTTPError:
+            pass
+        # mpv/ffplay can follow the handle redirect themselves.
+        return play_url

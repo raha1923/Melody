@@ -1,0 +1,112 @@
+# Melodify (terminal)
+
+Ubuntu CLI/TUI music client for [Melodify](https://desktop.melodify.app). Search artists, browse albums, pick songs, and **stream** playback through `mpv` (or `ffplay`) so tracks are never buffered entirely into Python memory.
+
+This is not a web app — no local HTTP server is started.
+
+## Requirements (Ubuntu)
+
+- Python 3.10+
+- `mpv` (preferred) or `ffmpeg`/`ffplay`
+- A Melodify session token + device headers (see below)
+
+```bash
+sudo apt update
+sudo apt install -y python3 python3-pip python3-venv mpv
+```
+
+## Install
+
+```bash
+cd /path/to/this/repo
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e .
+```
+
+## Configure
+
+Copy the example env file and fill in values from your Melodify desktop/PWA session:
+
+```bash
+cp .env.example .env
+```
+
+Required variables:
+
+| Variable | Description |
+|---|---|
+| `MELODIFY_AUTHORIZATION` | Session / download token (`authorization` header) |
+| `MELODIFY_USER_ID` | Numeric user id (`user-id` / `melodify_token`) |
+| `MELODIFY_DEVICE_ID` | Device id header |
+| `MELODIFY_DEVICE_TOKEN` | Device token UUID |
+
+Optional:
+
+| Variable | Default |
+|---|---|
+| `MELODIFY_API_BASE` | `https://melodify.pw/api/desktop/v9` |
+| `MELODIFY_APP_VERSION` | `9.1.3` |
+| `MELODIFY_PWA_VERSION` | `9.2.6 Desktop` |
+| `MELODIFY_PLATFORM` | `Linux-Desktop` |
+| `MELODIFY_STREAM_QUALITY` | `320` |
+| `MELODIFY_PLAYER` | `mpv` |
+
+**Never commit `.env`.** Tokens grant access to your Melodify account.
+
+## Run
+
+Interactive TUI:
+
+```bash
+melodify
+# or
+melodify tui
+```
+
+CLI helpers:
+
+```bash
+melodify search "googoosh"
+melodify artist 251
+melodify album 926
+melodify play "برای من"
+```
+
+### TUI keys
+
+| Key | Action |
+|---|---|
+| `/` | Focus search |
+| Enter | Search / open / play highlighted song |
+| `p` | Play highlighted song |
+| `s` | Stop playback |
+| Backspace | Go back |
+| `q` | Quit |
+
+## How playback works
+
+1. Track metadata from the API includes CDN handle URLs under `mp3s[].name`.
+2. The client appends `type=pwa`, `melodify_token`, `download_token`, and a `stamp…` query.
+3. `cdn.melodify.pw` responds with a short-lived **307** to `s*-cdn.melodify.pw`.
+4. `mpv`/`ffplay` follows the redirect and streams audio — Melodify’s Python process only holds the URL, not the file.
+
+## API surface used
+
+Base: `https://melodify.pw/api/desktop/v9`
+
+- `POST /search` — `{q, type, offset}` (`type=6` all, `1` tracks, `2` artists, `3` albums)
+- `GET /getArtistData?artist_id=`
+- `POST /getArtistTracks` — `{artist_id, offset, sort_by}`
+- `POST /getArtistAlbums` — `{artist_id, offset}`
+- `POST /getAlbumTracks` — `{album_id, offset}`
+- Play: `GET https://cdn.melodify.pw/handle/v2/tracks/{hash}/{quality}/{device-token}?…`
+
+See internal notes (agent store) for reverse-engineering details.
+
+## Troubleshooting
+
+- **Missing env vars** — copy `.env.example` → `.env` and fill all four required keys.
+- **Auth rejected (401/403)** — refresh the token from a logged-in desktop.melodify.app session.
+- **502 / timeouts** — Melodify’s API is occasionally flaky; retry.
+- **No sound** — confirm `mpv` works (`mpv --version`) and your session has stream rights for the track.
