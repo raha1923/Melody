@@ -139,7 +139,10 @@ class MelodifyMpris:
             from mpris_server.events import EventAdapter
             from mpris_server.server import Server
         except ImportError as exc:
-            self.last_error = f"mpris-server not installed ({exc}). pip install mpris-server"
+            self.last_error = (
+                f"mpris-server not installed ({exc}). "
+                "Run: pip install --no-deps mpris-server"
+            )
             log.info("MPRIS unavailable (install mpris-server): %s", exc)
             return False
 
@@ -392,25 +395,35 @@ def diagnose_os_media() -> list[tuple[str, bool, str]]:
     )
 
     try:
-        import mpris_server  # noqa: F401
-
-        rows.append(("mpris-server", True, "import ok"))
-    except ImportError as exc:
-        rows.append(("mpris-server", False, f"missing — pip install mpris-server ({exc})"))
-
-    try:
         import gi
 
         gi.require_version("Gio", "2.0")
         from gi.repository import Gio  # noqa: F401
 
-        rows.append(("PyGObject (gi)", True, "import ok"))
+        rows.append(("PyGObject (gi)", True, "system import ok (apt python3-gi)"))
     except Exception as exc:  # noqa: BLE001
         rows.append(
             (
                 "PyGObject (gi)",
                 False,
-                f"missing — sudo apt install python3-gi gir1.2-glib-2.0 ({exc})",
+                "missing — sudo apt install python3-gi gir1.2-glib-2.0; "
+                "recreate venv with: python3 -m venv --system-site-packages .venv "
+                f"({exc})",
+            )
+        )
+
+    try:
+        import mpris_server  # noqa: F401
+
+        rows.append(("mpris-server", True, "import ok"))
+    except ImportError as exc:
+        rows.append(
+            (
+                "mpris-server",
+                False,
+                "missing — pip install --no-deps mpris-server "
+                "(never pip-install PyGObject; use apt python3-gi) "
+                f"({exc})",
             )
         )
 

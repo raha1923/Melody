@@ -374,8 +374,11 @@ def _run_doctor() -> int:
         "  playerctl -p Melodify status\n"
         "  playerctl -p Melodify play-pause\n"
         "  playerctl -p Melodify next\n"
-        "\nTip: create the venv with system GI bindings:\n"
-        "  python3 -m venv --system-site-packages .venv\n"
+        "\nIf PyGObject/mpris failed, use apt + --no-deps (do not pip-build cairo):\n"
+        "  sudo apt install -y python3-gi gir1.2-glib-2.0\n"
+        "  python3 -m venv --system-site-packages .venv && source .venv/bin/activate\n"
+        "  pip install -e .\n"
+        "  pip install --no-deps mpris-server\n"
     )
     return 1 if failed else 0
 

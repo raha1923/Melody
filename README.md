@@ -13,7 +13,7 @@ This is not a web app — no local HTTP server is started.
 ```bash
 sudo apt update
 sudo apt install -y python3 python3-pip python3-venv mpv \
-  python3-gi gir1.2-glib-2.0  # for OS media keys (MPRIS)
+  python3-gi gir1.2-glib-2.0   # system PyGObject for MPRIS (do not pip-build it)
 ```
 
 ## Install / update
@@ -21,13 +21,27 @@ sudo apt install -y python3 python3-pip python3-venv mpv \
 ```bash
 cd /path/to/this/repo
 git pull
-# --system-site-packages so PyGObject (apt python3-gi) is visible for MPRIS
+
+# Critical: system-site-packages so apt's python3-gi (`gi`) is visible in the venv.
+# Without this, pip tries to compile PyGObject/pycairo and fails (missing cairo/pkg-config).
+python3 -m venv --system-site-packages .venv
+source .venv/bin/activate
+
+pip install -e .                 # core app (no MPRIS build deps)
+pip install --no-deps mpris-server   # OS media keys; uses system PyGObject
+
+melodify doctor                  # verifies MPRIS wiring
+```
+
+If you already created a venv **without** `--system-site-packages`, recreate it:
+
+```bash
+deactivate
+rm -rf .venv
 python3 -m venv --system-site-packages .venv
 source .venv/bin/activate
 pip install -e .
-# or, if already installed:
-# pip install -e . --force-reinstall --no-deps
-melodify doctor   # verifies OS media (MPRIS) wiring
+pip install --no-deps mpris-server
 ```
 
 ## Configure
@@ -149,7 +163,7 @@ playerctl -p Melodify next
 melodify doctor
 ```
 
-Needs: `python3-gi`, `gir1.2-glib-2.0`, a real desktop session bus, and `mpris-server` (pulled in by `pip install -e .`). Use a venv with `--system-site-packages` so `gi` imports. Set `MELODIFY_MPRIS=0` to disable.
+Needs: apt `python3-gi` + `gir1.2-glib-2.0`, a desktop session bus, and `pip install --no-deps mpris-server` (never `pip install PyGObject` — that tries to compile cairo). Set `MELODIFY_MPRIS=0` to disable.
 
 ### Long lists / pagination
 
