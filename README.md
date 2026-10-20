@@ -1,14 +1,16 @@
 # Melodify (terminal)
 
-Ubuntu CLI/TUI music client for [Melodify](https://desktop.melodify.app). Search artists, browse albums, pick songs, and **stream** playback through `mpv` (or `ffplay`) so tracks are never buffered entirely into Python memory.
+CLI/TUI music client for [Melodify](https://desktop.melodify.app) on **Ubuntu** and **macOS**. Search artists, browse albums, pick songs, and **stream** through `mpv` (or `ffplay`) so tracks are never buffered entirely into Python memory.
 
 This is not a web app — no local HTTP server is started.
 
-## Requirements (Ubuntu)
+## Requirements
 
 - Python 3.10+
 - `mpv` (preferred) or `ffmpeg`/`ffplay`
-- A Melodify session token + device headers (see below)
+- A Melodify session token + device headers (see Configure)
+
+### Ubuntu
 
 ```bash
 sudo apt update
@@ -16,33 +18,53 @@ sudo apt install -y python3 python3-pip python3-venv mpv \
   python3-gi gir1.2-glib-2.0   # system PyGObject for MPRIS (do not pip-build it)
 ```
 
+### macOS
+
+```bash
+brew install mpv python
+# Apple Silicon / Homebrew Python is fine; system python3 also works on recent macOS
+```
+
 ## Install / update
+
+### Ubuntu
 
 ```bash
 cd /path/to/this/repo
 git pull
 
 # Critical: system-site-packages so apt's python3-gi (`gi`) is visible in the venv.
-# Without this, pip tries to compile PyGObject/pycairo and fails (missing cairo/pkg-config).
 python3 -m venv --system-site-packages .venv
 source .venv/bin/activate
 
-pip install -e ".[mpris]"        # core + pure-Python MPRIS deps (StrEnum, pydbus, …)
+pip install -e ".[mpris]"            # core + pure-Python MPRIS deps
 pip install --no-deps mpris-server   # uses apt PyGObject — do not omit --no-deps
 
-melodify doctor                  # verifies MPRIS wiring
+melodify doctor
 ```
 
-If you already created a venv **without** `--system-site-packages`, recreate it:
+### macOS
 
 ```bash
-deactivate
-rm -rf .venv
-python3 -m venv --system-site-packages .venv
+cd /path/to/this/repo
+git pull
+
+python3 -m venv .venv
 source .venv/bin/activate
-pip install -e ".[mpris]"
-pip install --no-deps mpris-server
+
+pip install -e ".[macos]"   # core + PyObjC MediaPlayer (Now Playing / media keys)
+
+melodify doctor
 ```
+
+Data files live under:
+
+| OS | Path |
+|---|---|
+| Linux | `~/.local/share/melodify/` |
+| macOS | `~/Library/Application Support/melodify/` |
+
+On macOS, if you previously used the Linux-style `~/.local/share/melodify/` path, files are copied into Application Support on first use.
 
 ## Configure
 
@@ -68,10 +90,11 @@ Optional:
 | `MELODIFY_API_BASE` | `https://melodify.pw/api/desktop/v9` |
 | `MELODIFY_APP_VERSION` | `9.1.3` |
 | `MELODIFY_PWA_VERSION` | `9.2.6 Desktop` |
-| `MELODIFY_PLATFORM` | `Linux-Desktop` |
+| `MELODIFY_PLATFORM` | `Linux-Desktop` or `Mac-Desktop` (auto) |
 | `MELODIFY_STREAM_QUALITY` | `320` |
 | `MELODIFY_PLAYER` | `mpv` |
-| `MELODIFY_MPRIS` | `1` (set `0` to disable OS media controls) |
+| `MELODIFY_MPRIS` | `1` (Linux; set `0` to disable MPRIS) |
+| `MELODIFY_NOWPLAYING` | `1` (macOS; set `0` to disable Now Playing) |
 
 **Never commit `.env`.** Tokens grant access to your Melodify account.
 
@@ -102,8 +125,10 @@ Melodify’s PWA “recently listened” list is **offline** (local Redux/Indexe
 
 | File | Purpose |
 |---|---|
-| `~/.local/share/melodify/recent.json` | Recently played list (deduped by track id, capped at 50) |
-| `~/.local/share/melodify/playback.json` | Scrubber positions for continue/seek |
+| `…/melodify/recent.json` | Recently played list (deduped by track id, capped at 50) |
+| `…/melodify/playback.json` | Scrubber positions for continue/seek |
+
+(`…` = `~/.local/share` on Linux, `~/Library/Application Support` on macOS.)
 
 - Every successful play start (and pause/stop/finish) **upserts** the track to the front of `recent.json`.
 - `melodify last` / TUI **Last played** prefer that local list. If it is empty, they fall back to online `getUserMostListenedTracks` (after a short `recently_listened` probe).
@@ -143,27 +168,32 @@ Right pane updates from mpv IPC ~2×/sec while a track is playing.
 | Backspace | Go back |
 | `q` | Quit |
 
-### OS media controls (MPRIS)
+### OS media controls
 
-Melodify already speaks the Linux media APIs: it publishes **MPRIS2** on the session D-Bus as `org.mpris.MediaPlayer2.Melodify` and installs `~/.local/share/applications/melodify.desktop`.
+#### Linux (MPRIS)
 
-That hooks into:
-
-- GNOME / KDE media popups (title, artist, artwork)
-- Keyboard media keys (play/pause, next, previous)
-- `playerctl` and other MPRIS clients (seek + volume when using `mpv`)
+Publishes **MPRIS2** as `org.mpris.MediaPlayer2.Melodify` (GNOME/KDE media popup, media keys, `playerctl`).
 
 ```bash
-# while Melodify is running on your desktop:
 playerctl -p Melodify status
 playerctl -p Melodify play-pause
-playerctl -p Melodify next
-
-# offline check (no Melodify account needed):
-melodify doctor
 ```
 
-Needs: apt `python3-gi` + `gir1.2-glib-2.0`, a desktop session bus, `pip install -e ".[mpris]"`, then `pip install --no-deps mpris-server` (never `pip install PyGObject` — that compiles cairo). Set `MELODIFY_MPRIS=0` to disable.
+Needs: apt `python3-gi` + `gir1.2-glib-2.0`, session D-Bus, `pip install -e ".[mpris]"`, then `pip install --no-deps mpris-server`. Set `MELODIFY_MPRIS=0` to disable.
+
+#### macOS (Now Playing)
+
+Uses Apple’s **MediaPlayer** framework (via PyObjC) so Melodify appears in **Control Center → Now Playing** and responds to keyboard media keys (play/pause, next, previous; scrub when the OS sends a seek).
+
+```bash
+pip install -e ".[macos]"   # pulls pyobjc-framework-MediaPlayer
+```
+
+Limitations: artwork in Control Center is best-effort (title/artist/duration always set). Headless SSH sessions without a GUI won’t show Now Playing. Set `MELODIFY_NOWPLAYING=0` to disable.
+
+```bash
+melodify doctor   # platform-aware (MPRIS on Linux, Now Playing on macOS)
+```
 
 ### Long lists / pagination
 

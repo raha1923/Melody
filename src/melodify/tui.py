@@ -31,7 +31,9 @@ from .api import MelodifyAPIError, MelodifyClient
 from .config import Settings
 from .history import resolve_listening_history
 from .models import Album, Artist, ListeningHistory, Track
-from .mpris_bridge import MelodifyMpris, MprisActions
+from .mpris_bridge import MprisActions
+from .os_media import create_media_bridge
+from .paths import data_dir
 from .paging import PREFETCH_CAP, ListPager
 from .player import PlayerError, StreamPlayer
 from .progress import ProgressStore
@@ -520,7 +522,7 @@ class SearchScreen(Screen):
                 self.set_loading(
                     False,
                     "No local recently-played tracks yet (and online history is empty). "
-                    "Play something first — Melodify saves them under ~/.local/share/melodify/.",
+                    f"Play something first — Melodify saves them under {data_dir()}/.",
                 )
             else:
                 more = (
@@ -921,7 +923,9 @@ class MelodifyApp(App[None]):
         self.progress = ProgressStore()
         self.recent = RecentStore()
         self.queue = PlayQueue()
-        self.mpris = MelodifyMpris()
+        self.media = create_media_bridge()
+        # Alias kept so existing notify/sync call sites stay readable.
+        self.mpris = self.media
         self._last_track: Track | None = None
         self._expect_playback = False
         self._saw_alive = False
@@ -932,7 +936,7 @@ class MelodifyApp(App[None]):
     def on_mount(self) -> None:
         self.push_screen(SearchScreen())
         self.set_interval(0.5, self._on_player_tick)
-        self._start_mpris()
+        self._start_os_media()
         missing = self.settings.missing()
         if missing:
             self.notify(
@@ -944,15 +948,15 @@ class MelodifyApp(App[None]):
     def on_unmount(self) -> None:
         self._expect_playback = False
         self._persist_current_position(mark_recent=True)
-        self.mpris.stop()
+        self.media.stop()
         self.player.stop()
         self.client.close()
 
-    def _start_mpris(self) -> None:
+    def _start_os_media(self) -> None:
         app = self
 
         def _call(action: str) -> None:
-            # D-Bus thread → Textual thread.
+            # OS media thread → Textual thread.
             try:
                 app.call_from_thread(getattr(app, action))
             except RuntimeError:
@@ -972,7 +976,7 @@ class MelodifyApp(App[None]):
                                 mark_last=True,
                             )
                     self.refresh_player_chrome()
-                    self.mpris.notify(seek=True)
+                    self.media.notify(seek=True)
                 except PlayerError as exc:
                     self.notify(str(exc), severity="warning", timeout=3)
 
@@ -986,7 +990,7 @@ class MelodifyApp(App[None]):
                 try:
                     self.player.set_volume(level * 100.0)
                     self.refresh_player_chrome()
-                    self.mpris.notify(volume=True)
+                    self.media.notify(volume=True)
                 except PlayerError as exc:
                     self.notify(str(exc), severity="warning", timeout=3)
 
@@ -995,7 +999,7 @@ class MelodifyApp(App[None]):
             except RuntimeError:
                 run()
 
-        self.mpris.attach(
+        self.media.attach(
             player=self.player,
             queue=self.queue,
             get_track=lambda: self._last_track,
@@ -1011,14 +1015,18 @@ class MelodifyApp(App[None]):
             ),
         )
 
-        if self.mpris.start():
-            self.notify(
-                "OS media controls on — GNOME/KDE keys & playerctl (-p Melodify).",
-                timeout=4,
+        if self.media.start():
+            from .paths import is_macos
+
+            msg = (
+                "OS media controls on — Control Center / media keys."
+                if is_macos()
+                else "OS media controls on — GNOME/KDE keys & playerctl (-p Melodify)."
             )
-        elif self.mpris.last_error:
+            self.notify(msg, timeout=4)
+        elif getattr(self.media, "last_error", None):
             self.notify(
-                f"OS media controls off: {self.mpris.last_error}",
+                f"OS media controls off: {self.media.last_error}",
                 severity="warning",
                 timeout=8,
             )
@@ -1541,7 +1549,7 @@ class MelodifyApp(App[None]):
         if not history.tracks:
             self.call_from_thread(
                 self.notify,
-                "Nothing to continue — play something first (saved under ~/.local/share/melodify/).",
+                f"Nothing to continue — play something first (saved under {data_dir()}/).",
                 severity="warning",
                 timeout=5,
             )

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from dataclasses import dataclass
 
 from dotenv import load_dotenv
@@ -9,8 +10,8 @@ DEFAULT_API_BASE = "https://melodify.pw/api/desktop/v9"
 DEFAULT_ORIGIN = "https://desktop.melodify.app"
 DEFAULT_APP_VERSION = "9.1.3"
 DEFAULT_PWA_VERSION = "9.2.6 Desktop"
-DEFAULT_PLATFORM = "Linux-Desktop"
-DEFAULT_DEVICE_NAME = "Linux Desktop"
+DEFAULT_PLATFORM = "Mac-Desktop" if sys.platform == "darwin" else "Linux-Desktop"
+DEFAULT_DEVICE_NAME = "Mac Desktop" if sys.platform == "darwin" else "Linux Desktop"
 DEFAULT_STREAM_QUALITY = "320"
 
 

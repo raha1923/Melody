@@ -42,9 +42,11 @@ def detect_player(preferred: str = "mpv") -> PlayerBackend:
         binary = shutil.which(key)
         if binary:
             return PlayerBackend(name=key, binary=binary)
+    import sys
+
+    hint = "brew install mpv" if sys.platform == "darwin" else "sudo apt install mpv"
     raise PlayerError(
-        "No stream player found. Install mpv (preferred) or ffmpeg/ffplay: "
-        "sudo apt install mpv"
+        "No stream player found. Install mpv (preferred) or ffmpeg/ffplay: " + hint
     )
 
 

@@ -38,6 +38,10 @@ StartupNotify=false
 
 def ensure_desktop_entry() -> Path | None:
     """Install ~/.local/share/applications/melodify.desktop for GNOME/KDE media UIs."""
+    from .paths import is_linux
+
+    if not is_linux():
+        return None
     try:
         apps = Path.home() / ".local" / "share" / "applications"
         apps.mkdir(parents=True, exist_ok=True)

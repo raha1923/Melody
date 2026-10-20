@@ -6,9 +6,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .paths import playback_path
+
 
 def default_state_path() -> Path:
-    return Path.home() / ".local" / "share" / "melodify" / "playback.json"
+    return playback_path()
 
 
 @dataclass
