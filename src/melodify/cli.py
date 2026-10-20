@@ -9,6 +9,7 @@ from .config import load_settings
 from .models import Track
 from .controls import interactive_playback_loop
 from .history import resolve_listening_history
+from .mpris_bridge import MelodifyMpris, build_direct_actions
 from .player import PlayerError, StreamPlayer, detect_player
 from .progress import ProgressStore
 from .queue import PlayQueue
@@ -282,6 +283,8 @@ def _stream_queue(
         )
         recent.upsert(current, position_seconds=pos)
 
+    mpris = MelodifyMpris()
+
     def _play_track(track: Track, *, seek: float = 0.0) -> None:
         url = client.build_play_url(track, quality=quality)
         client.record_listen(track)
@@ -295,18 +298,37 @@ def _stream_queue(
             http_headers=headers,
             start_seconds=seek,
         )
+        mpris.notify(title=True, playpause=True)
+
+    mpris.attach(
+        player=player,
+        queue=queue,
+        get_track=lambda: queue.current,
+        actions=build_direct_actions(
+            player,
+            queue,
+            play_track=lambda track: _play_track(track, seek=0.0),
+        ),
+    )
+    if mpris.start():
+        print("OS media controls (MPRIS) enabled.", flush=True)
 
     first = queue.current
     if first is None:
         print("Queue is empty.", file=sys.stderr)
+        mpris.stop()
         return 1
-    _play_track(first, seek=start_seconds)
-    interactive_playback_loop(
-        player,
-        on_position=_save_for_current,
-        queue=queue,
-        play_track=lambda track: _play_track(track, seek=0.0),
-    )
+    try:
+        _play_track(first, seek=start_seconds)
+        interactive_playback_loop(
+            player,
+            on_position=_save_for_current,
+            queue=queue,
+            play_track=lambda track: _play_track(track, seek=0.0),
+            on_tick=mpris.sync_from_player,
+        )
+    finally:
+        mpris.stop()
     current = queue.current
     if current is not None and not player.is_alive:
         pos = progress.get_position(current.id)

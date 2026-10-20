@@ -28,6 +28,7 @@ def interactive_playback_loop(
     on_position: Callable[[float], None] | None = None,
     queue: PlayQueue | None = None,
     play_track: Callable[[Track], None] | None = None,
+    on_tick: Callable[[], None] | None = None,
 ) -> None:
     """TTY control loop for CLI play/continue.
 
@@ -58,6 +59,7 @@ def interactive_playback_loop(
                     on_position=on_position,
                     queue=queue,
                     play_track=play_track,
+                    on_tick=on_tick,
                 )
         return
 
@@ -70,6 +72,11 @@ def interactive_playback_loop(
     try:
         tty.setcbreak(fd)
         while True:
+            if on_tick is not None:
+                try:
+                    on_tick()
+                except Exception:  # noqa: BLE001
+                    pass
             if not player.is_alive:
                 if (
                     queue is not None
@@ -101,6 +108,8 @@ def interactive_playback_loop(
                         end="",
                         flush=True,
                     )
+                    if on_tick is not None:
+                        on_tick()
                 elif ch in ("s", "q", "\x03"):
                     pos = player.stop()
                     if on_position and pos is not None:

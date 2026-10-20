@@ -31,6 +31,7 @@ from .api import MelodifyAPIError, MelodifyClient
 from .config import Settings
 from .history import resolve_listening_history
 from .models import Album, Artist, ListeningHistory, Track
+from .mpris_bridge import MelodifyMpris, MprisActions
 from .player import PlayerError, StreamPlayer
 from .progress import ProgressStore
 from .queue import PlayQueue
@@ -692,6 +693,7 @@ class MelodifyApp(App[None]):
         self.progress = ProgressStore()
         self.recent = RecentStore()
         self.queue = PlayQueue()
+        self.mpris = MelodifyMpris()
         self._last_track: Track | None = None
         self._expect_playback = False
         self._saw_alive = False
@@ -701,6 +703,7 @@ class MelodifyApp(App[None]):
     def on_mount(self) -> None:
         self.push_screen(SearchScreen())
         self.set_interval(0.5, self._on_player_tick)
+        self._start_mpris()
         missing = self.settings.missing()
         if missing:
             self.notify(
@@ -712,8 +715,111 @@ class MelodifyApp(App[None]):
     def on_unmount(self) -> None:
         self._expect_playback = False
         self._persist_current_position(mark_recent=True)
+        self.mpris.stop()
         self.player.stop()
         self.client.close()
+
+    def _start_mpris(self) -> None:
+        app = self
+
+        def _call(action: str) -> None:
+            # D-Bus thread → Textual thread.
+            try:
+                app.call_from_thread(getattr(app, action))
+            except RuntimeError:
+                getattr(app, action)()
+
+        def _call_seek(seconds: float) -> None:
+            def run() -> None:
+                try:
+                    self.player.seek(seconds, relative=False)
+                    if self._last_track is not None:
+                        pos = self.player.get_position()
+                        if pos is not None:
+                            self.progress.save_position(
+                                self._last_track.id,
+                                pos,
+                                title=self._last_track.title,
+                                mark_last=True,
+                            )
+                    self.refresh_player_chrome()
+                    self.mpris.notify(seek=True)
+                except PlayerError as exc:
+                    self.notify(str(exc), severity="warning", timeout=3)
+
+            try:
+                self.call_from_thread(run)
+            except RuntimeError:
+                run()
+
+        def _call_vol(level: float) -> None:
+            def run() -> None:
+                try:
+                    self.player.set_volume(level * 100.0)
+                    self.refresh_player_chrome()
+                    self.mpris.notify(volume=True)
+                except PlayerError as exc:
+                    self.notify(str(exc), severity="warning", timeout=3)
+
+            try:
+                self.call_from_thread(run)
+            except RuntimeError:
+                run()
+
+        self.mpris.attach(
+            player=self.player,
+            queue=self.queue,
+            get_track=lambda: self._last_track,
+            actions=MprisActions(
+                play_pause=lambda: _call("action_toggle_pause"),
+                pause=lambda: _call("_mpris_pause"),
+                resume=lambda: _call("_mpris_resume"),
+                stop=lambda: _call("action_stop_playback"),
+                next_track=lambda: _call("action_play_next"),
+                previous_track=lambda: _call("action_play_prev"),
+                seek_to=_call_seek,
+                set_volume=_call_vol,
+            ),
+        )
+
+        if self.mpris.start():
+            self.notify("OS media controls (MPRIS) enabled.", timeout=3)
+
+    def _mpris_pause(self) -> None:
+        try:
+            self.player.pause()
+        except PlayerError as exc:
+            self.notify(str(exc), severity="warning", timeout=3)
+            return
+        status = self.player.status()
+        if self._last_track is not None and status.position is not None:
+            self.progress.save_position(
+                self._last_track.id,
+                status.position,
+                title=self._last_track.title,
+                mark_last=True,
+            )
+            self.recent.upsert(self._last_track, position_seconds=status.position)
+        self.refresh_player_chrome()
+        self.mpris.notify(playpause=True)
+
+    def _mpris_resume(self) -> None:
+        try:
+            if self.player.is_alive and self.player.is_paused:
+                self.player.resume()
+            elif self._last_track is not None and not self.player.is_alive:
+                self._play_track(self._last_track, from_queue=True)
+                return
+            elif self.player.is_alive:
+                self.player.resume()
+            else:
+                self.notify("Nothing to resume — pick a song first.", severity="warning")
+                return
+        except PlayerError as exc:
+            self.notify(str(exc), severity="warning", timeout=3)
+            return
+        self.refresh_player_chrome()
+        self.mpris.notify(playpause=True)
 
     def _persist_current_position(self, *, mark_recent: bool = True) -> float | None:
         """Save scrubber position (and optionally upsert recent) for the current track."""
@@ -756,6 +862,7 @@ class MelodifyApp(App[None]):
     def _on_player_tick(self) -> None:
         self.refresh_player_chrome()
         self._watch_playback_end()
+        self.mpris.sync_from_player()
 
     def action_go_back(self) -> None:
         if len(self.screen_stack) > 1:
@@ -775,6 +882,7 @@ class MelodifyApp(App[None]):
             )
             self.recent.upsert(self._last_track, position_seconds=position)
         self.refresh_player_chrome()
+        self.mpris.notify(playpause=True, ended=True)
         self.notify("Playback stopped.", timeout=2)
 
     def action_play_next(self) -> None:
@@ -837,6 +945,7 @@ class MelodifyApp(App[None]):
             )
             self.recent.upsert(self._last_track, position_seconds=status.position)
         self.refresh_player_chrome()
+        self.mpris.notify(playpause=True)
         label = "Paused" if paused else "Playing"
         pos = ""
         if status.position is not None:
@@ -1064,6 +1173,7 @@ class MelodifyApp(App[None]):
             )
             return
         self.call_from_thread(self.refresh_player_chrome)
+        self.call_from_thread(self.mpris.notify, title=True, playpause=True)
         self.call_from_thread(
             self.notify,
             f"Playing: {track.title} [{self.queue.label()}]",

@@ -12,7 +12,8 @@ This is not a web app — no local HTTP server is started.
 
 ```bash
 sudo apt update
-sudo apt install -y python3 python3-pip python3-venv mpv
+sudo apt install -y python3 python3-pip python3-venv mpv \
+  python3-gi gir1.2-glib-2.0  # for OS media keys (MPRIS)
 ```
 
 ## Install / update
@@ -54,6 +55,7 @@ Optional:
 | `MELODIFY_PLATFORM` | `Linux-Desktop` |
 | `MELODIFY_STREAM_QUALITY` | `320` |
 | `MELODIFY_PLAYER` | `mpv` |
+| `MELODIFY_MPRIS` | `1` (set `0` to disable OS media controls) |
 
 **Never commit `.env`.** Tokens grant access to your Melodify account.
 
@@ -123,6 +125,22 @@ Right pane updates from mpv IPC ~2×/sec while a track is playing.
 | `s` | Stop playback |
 | Backspace | Go back |
 | `q` | Quit |
+
+### OS media controls (MPRIS)
+
+On a normal Ubuntu desktop session, Melodify exports **MPRIS2** on D-Bus as `org.mpris.MediaPlayer2.Melodify`. That means:
+
+- GNOME / KDE media popups show the current track (title, artist, art)
+- Keyboard media keys and `playerctl` can pause / play / next / previous
+- Seeking and volume from the OS media UI also work when `mpv` is the backend
+
+```bash
+playerctl -p Melodify status
+playerctl -p Melodify play-pause
+playerctl -p Melodify next
+```
+
+Set `MELODIFY_MPRIS=0` to disable. Headless environments without a session bus simply skip MPRIS.
 
 ### Long lists / pagination
 
