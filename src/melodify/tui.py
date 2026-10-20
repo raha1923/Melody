@@ -32,7 +32,7 @@ from .config import Settings
 from .history import resolve_listening_history
 from .models import Album, Artist, ListeningHistory, Track
 from .mpris_bridge import MelodifyMpris, MprisActions
-from .paging import ListPager
+from .paging import PREFETCH_CAP, ListPager
 from .player import PlayerError, StreamPlayer
 from .progress import ProgressStore
 from .queue import PlayQueue
@@ -523,12 +523,17 @@ class SearchScreen(Screen):
                     "Play something first — Melodify saves them under ~/.local/share/melodify/.",
                 )
             else:
-                more = "" if history.end else " · m / Load more for next page"
+                more = (
+                    ""
+                    if history.end
+                    else f" · loading up to {PREFETCH_CAP}…"
+                )
                 self.set_loading(
                     False,
                     f"{len(history.tracks)} tracks from {history.describe_source()}{more}. "
                     "↑↓/PgUp/PgDn scroll · Enter plays · c continues the first.",
                 )
+            app.schedule_prefetch(last_list)
 
         _call_ui(self, apply)
 
@@ -561,28 +566,32 @@ class SearchScreen(Screen):
 
         def apply() -> None:
             tracks = self.query_one("#track-list", SelectableList)
+            # Type-6 "end" is unreliable for continued type-1/2/3 paging — allow
+            # prefetch to discover the real end (or stop at PREFETCH_CAP).
             tracks.set_pager(
                 ListPager(
                     fetch=fetch_tracks,
                     items=list(results.tracks),
-                    end=results.end,
+                    end=not bool(results.tracks),
                     label=f'search “{query}” songs',
                 ),
                 focus=bool(results.tracks),
             )
-            self.query_one("#artist-list", SelectableList).set_pager(
+            artists = self.query_one("#artist-list", SelectableList)
+            artists.set_pager(
                 ListPager(
                     fetch=fetch_artists,
                     items=list(results.artists),
-                    end=results.end,
+                    end=not bool(results.artists),
                     label=f'search “{query}” artists',
                 )
             )
-            self.query_one("#album-list", SelectableList).set_pager(
+            albums = self.query_one("#album-list", SelectableList)
+            albums.set_pager(
                 ListPager(
                     fetch=fetch_albums,
                     items=list(results.albums),
-                    end=results.end,
+                    end=not bool(results.albums),
                     label=f'search “{query}” albums',
                 )
             )
@@ -590,11 +599,10 @@ class SearchScreen(Screen):
             if total == 0:
                 self.set_loading(False, f'No results for “{query}”. Try another spelling.')
             else:
-                more = "" if results.end else " · m / Load more for next page"
                 self.set_loading(
                     False,
                     f"Found {len(results.tracks)} songs, {len(results.artists)} artists, "
-                    f"{len(results.albums)} albums{more}. "
+                    f"{len(results.albums)} albums · loading up to {PREFETCH_CAP}…. "
                     "↑↓/PgUp/PgDn scroll · Enter opens · p plays.",
                 )
             try:
@@ -602,6 +610,9 @@ class SearchScreen(Screen):
                 tabs.active = "tab-tracks"
             except Exception:
                 pass
+            app.schedule_prefetch(tracks)
+            app.schedule_prefetch(artists)
+            app.schedule_prefetch(albums)
 
         _call_ui(self, apply)
 
@@ -692,7 +703,8 @@ class ArtistScreen(Screen):
                 ),
                 focus=bool(tracks),
             )
-            self.query_one("#artist-album-list", SelectableList).set_pager(
+            album_list = self.query_one("#artist-album-list", SelectableList)
+            album_list.set_pager(
                 ListPager(
                     fetch=fetch_albums,
                     items=list(albums),
@@ -703,12 +715,18 @@ class ArtistScreen(Screen):
             if not tracks and not albums:
                 self._set_status("This artist has no songs or albums available.", loading=False)
             else:
-                more = "" if tracks_end else " · m / Load more for next page"
+                more = (
+                    ""
+                    if tracks_end and albums_end
+                    else f" · loading up to {PREFETCH_CAP}…"
+                )
                 self._set_status(
                     f"{len(tracks)} songs · {len(albums)} albums{more}. "
                     "↑↓/PgUp/PgDn scroll · Enter plays · fills queue.",
                     loading=False,
                 )
+            app.schedule_prefetch(track_list)
+            app.schedule_prefetch(album_list)
 
         _call_ui(self, apply)
 
@@ -771,7 +789,8 @@ class AlbumScreen(Screen):
             return client.get_album_tracks(album_id, offset=offset)
 
         def apply() -> None:
-            self.query_one("#album-track-list", SelectableList).set_pager(
+            track_list = self.query_one("#album-track-list", SelectableList)
+            track_list.set_pager(
                 ListPager(
                     fetch=fetch_tracks,
                     items=list(tracks),
@@ -783,11 +802,12 @@ class AlbumScreen(Screen):
             if not tracks:
                 self._set_status("This album has no playable tracks.", loading=False)
             else:
-                more = "" if tracks_end else " · m / Load more for next page"
+                more = "" if tracks_end else f" · loading up to {PREFETCH_CAP}…"
                 self._set_status(
                     f"{len(tracks)} tracks{more}. ↑↓/PgUp/PgDn scroll · Enter or p plays.",
                     loading=False,
                 )
+            app.schedule_prefetch(track_list)
 
         _call_ui(self, apply)
 
@@ -1081,6 +1101,89 @@ class MelodifyApp(App[None]):
         self.refresh_player_chrome()
         self._maybe_prefetch_queue()
         self._watch_playback_end()
+
+    def schedule_prefetch(self, lv: SelectableList) -> None:
+        """Background-fetch pages until end or PREFETCH_CAP (500)."""
+        pager = lv.pager
+        if pager is None or pager.end or len(pager.items) >= PREFETCH_CAP:
+            return
+        if pager.prefetching:
+            return
+        self.run_worker(
+            partial(self._prefetch_list_worker, lv),
+            exclusive=False,
+            thread=True,
+        )
+
+    def _prefetch_list_worker(self, lv: SelectableList) -> None:
+        pager = lv.pager
+        if pager is None or pager.end or len(pager.items) >= PREFETCH_CAP:
+            return
+
+        def on_progress(count: int, ended: bool) -> None:
+            def apply() -> None:
+                lv.apply_pager_state(keep_index=True)
+                if lv.kind == "track" and self.queue.pager is pager:
+                    self.queue.extend_unique(
+                        [t for t in pager.items if isinstance(t, Track)]
+                    )
+                    self.refresh_player_chrome()
+                try:
+                    status = self.screen.query_one("#status", Static)
+                    suffix = ""
+                    if ended:
+                        suffix = " · done"
+                    elif count >= PREFETCH_CAP:
+                        suffix = f" · cap {PREFETCH_CAP} (m for more)"
+                    else:
+                        suffix = "…"
+                    label = pager.label or "list"
+                    status.update(f"Loaded {count} · {label}{suffix}")
+                except Exception:
+                    pass
+
+            self.call_from_thread(apply)
+
+        try:
+            pager.prefetch_until(cap=PREFETCH_CAP, on_progress=on_progress)
+        except MelodifyAPIError as exc:
+            self.call_from_thread(
+                self.notify,
+                f"Prefetch stopped: {exc}",
+                severity="warning",
+                timeout=5,
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.call_from_thread(
+                self.notify,
+                f"Prefetch stopped: {exc}",
+                severity="warning",
+                timeout=5,
+            )
+
+        def done() -> None:
+            lv.apply_pager_state(keep_index=True)
+            if lv.kind == "track" and self.queue.pager is pager:
+                self.queue.extend_unique(
+                    [t for t in pager.items if isinstance(t, Track)]
+                )
+                self.refresh_player_chrome()
+            n = len(lv._items)
+            if pager.end:
+                detail = f"Loaded {n} · complete"
+            elif n >= PREFETCH_CAP:
+                detail = f"Loaded {n} (cap {PREFETCH_CAP}) · m / Load more for more"
+            else:
+                detail = f"Loaded {n}"
+            try:
+                self.screen.query_one("#status", Static).update(
+                    f"{detail} · {pager.label or 'list'}"
+                )
+            except Exception:
+                pass
+            self.notify(detail, timeout=3)
+
+        self.call_from_thread(done)
 
     def action_load_more(self) -> None:
         target = self._active_selectable_list()

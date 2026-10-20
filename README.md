@@ -171,13 +171,13 @@ Melodify’s API returns about **40 items per page**. The client automatically f
 
 ### Pagination / Load more
 
-Melodify APIs return pages (~40 tracks). The TUI loads the first page, then:
+Melodify APIs return ~40 items per page. On open, Melodify **auto-prefetches** further pages in the background until the API says `end` or **500** items (status shows `Loaded 80…`).
 
-- Scroll onto the bottom **── Load more (m) ──** row, press **`m`**, **PgDn/End** at the bottom, or click **Load more**
+- Beyond 500 (or if prefetch stopped early), use **`m`**, **Load more**, or the bottom **── Load more ──** row
 - New rows **append** (already-loaded tracks stay)
-- Playing from a list uses the **full loaded set** as the queue; near the end of the queue Melodify **prefetches** the next page when the API still has more (`end: false`)
+- Playing from a list uses the **full loaded set** as the queue; near the end of the queue Melodify also pulls the next page when more exist
 
-Applies to: search Songs/Artists/Albums, artist Songs/Albums, album tracks, and online last-played (local recent is already complete).
+Auto-prefetch applies to: search Songs/Artists/Albums, artist Songs/Albums, album tracks, and online last-played (local recent is already complete).
 
 ### Play queue
 
