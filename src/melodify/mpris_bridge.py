@@ -379,6 +379,91 @@ class MelodifyMpris:
         self.notify(all_props=True)
         return True
 
+    def stop(self) -> None:
+        with self._lock:
+            server = self._server
+            self._server = None
+            self._events = None
+            self._adapter = None
+            self._enabled = False
+        if server is not None:
+            try:
+                server.quit()
+            except Exception:  # noqa: BLE001
+                log.debug("MPRIS quit failed", exc_info=True)
+
+    def notify(
+        self,
+        *,
+        all_props: bool = False,
+        title: bool = False,
+        playpause: bool = False,
+        seek: bool = False,
+        volume: bool = False,
+        ended: bool = False,
+    ) -> None:
+        if not self._enabled or self._events is None:
+            return
+        events = self._events
+        try:
+            if all_props:
+                events.emit_all()
+                return
+            if ended:
+                events.on_ended()
+            if title:
+                events.on_title()
+            if playpause:
+                events.on_playpause()
+            if seek:
+                pos = 0
+                if self._player is not None:
+                    raw = self._player.get_position()
+                    if raw is not None:
+                        pos = int(raw * _US)
+                events.on_seek(pos)
+            if volume:
+                events.on_volume()
+            # Always refresh playback + can_* when anything changes.
+            if title or playpause or ended or seek:
+                events.on_playback()
+                events.on_options()
+        except Exception:  # noqa: BLE001
+            log.debug("MPRIS notify failed", exc_info=True)
+
+    def sync_from_player(self) -> None:
+        """Cheap poll helper — emit only when status/track actually change."""
+        if not self._enabled:
+            return
+        player = self._player
+        track = self._get_track()
+        track_id = track.id if track else None
+        if player is None or not player.is_alive:
+            status = "stopped"
+        elif player.is_paused:
+            status = "paused"
+        else:
+            status = "playing"
+        changed_title = track_id != self._last_track_id
+        changed_status = status != self._last_status
+        self._last_track_id = track_id
+        self._last_status = status
+        if changed_title or changed_status:
+            self.notify(
+                title=changed_title,
+                playpause=changed_status,
+                ended=(status == "stopped" and changed_status),
+            )
+
+    def _run(self, fn: Callable[[MprisActions], None]) -> None:
+        actions = self._actions
+        if actions is None:
+            return
+        try:
+            fn(actions)
+        except Exception:  # noqa: BLE001
+            log.debug("MPRIS action failed", exc_info=True)
+
 
 def diagnose_os_media() -> list[tuple[str, bool, str]]:
     """Return (check, ok, detail) rows for `melodify doctor`."""
@@ -464,9 +549,21 @@ def diagnose_os_media() -> list[tuple[str, bool, str]]:
     rows.append(("mpv", mpv is not None, mpv or "sudo apt install mpv"))
 
     # Live publish probe (only when deps look OK).
-    if enabled and all(ok for name, ok, _ in rows if name in {"mpris-server", "PyGObject (gi)", "D-Bus session"}):
+    if enabled and all(
+        ok
+        for name, ok, _ in rows
+        if name in {"mpris-server", "PyGObject (gi)", "D-Bus session"}
+    ):
         probe = MelodifyMpris()
-        ok = probe.start()
+        try:
+            ok = probe.start()
+        except Exception as exc:  # noqa: BLE001
+            rows.append(("MPRIS publish", False, f"crashed: {exc}"))
+            try:
+                probe.stop()
+            except Exception:  # noqa: BLE001
+                pass
+            return rows
         if ok:
             rows.append(
                 (
@@ -482,91 +579,6 @@ def diagnose_os_media() -> list[tuple[str, bool, str]]:
         rows.append(("MPRIS publish", False, "skipped (fix earlier failures first)"))
 
     return rows
-
-    def stop(self) -> None:
-        with self._lock:
-            server = self._server
-            self._server = None
-            self._events = None
-            self._adapter = None
-            self._enabled = False
-        if server is not None:
-            try:
-                server.quit()
-            except Exception:  # noqa: BLE001
-                log.debug("MPRIS quit failed", exc_info=True)
-
-    def notify(
-        self,
-        *,
-        all_props: bool = False,
-        title: bool = False,
-        playpause: bool = False,
-        seek: bool = False,
-        volume: bool = False,
-        ended: bool = False,
-    ) -> None:
-        if not self._enabled or self._events is None:
-            return
-        events = self._events
-        try:
-            if all_props:
-                events.emit_all()
-                return
-            if ended:
-                events.on_ended()
-            if title:
-                events.on_title()
-            if playpause:
-                events.on_playpause()
-            if seek:
-                pos = 0
-                if self._player is not None:
-                    raw = self._player.get_position()
-                    if raw is not None:
-                        pos = int(raw * _US)
-                events.on_seek(pos)
-            if volume:
-                events.on_volume()
-            # Always refresh playback + can_* when anything changes.
-            if title or playpause or ended or seek:
-                events.on_playback()
-                events.on_options()
-        except Exception:  # noqa: BLE001
-            log.debug("MPRIS notify failed", exc_info=True)
-
-    def sync_from_player(self) -> None:
-        """Cheap poll helper — emit only when status/track actually change."""
-        if not self._enabled:
-            return
-        player = self._player
-        track = self._get_track()
-        track_id = track.id if track else None
-        if player is None or not player.is_alive:
-            status = "stopped"
-        elif player.is_paused:
-            status = "paused"
-        else:
-            status = "playing"
-        changed_title = track_id != self._last_track_id
-        changed_status = status != self._last_status
-        self._last_track_id = track_id
-        self._last_status = status
-        if changed_title or changed_status:
-            self.notify(
-                title=changed_title,
-                playpause=changed_status,
-                ended=(status == "stopped" and changed_status),
-            )
-
-    def _run(self, fn: Callable[[MprisActions], None]) -> None:
-        actions = self._actions
-        if actions is None:
-            return
-        try:
-            fn(actions)
-        except Exception:  # noqa: BLE001
-            log.debug("MPRIS action failed", exc_info=True)
 
 
 def build_direct_actions(
