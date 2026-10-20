@@ -1,34 +1,116 @@
 # Melodify (terminal)
 
-Ubuntu CLI/TUI music client for [Melodify](https://desktop.melodify.app). Search artists, browse albums, pick songs, and **stream** playback through `mpv` (or `ffplay`) so tracks are never buffered entirely into Python memory.
+CLI/TUI music client for [Melodify](https://desktop.melodify.app) on **Ubuntu** and **macOS**. Search artists, browse albums, pick songs, and **stream** through `mpv` (or `ffplay`) so tracks are never buffered entirely into Python memory.
 
 This is not a web app — no local HTTP server is started.
 
-## Requirements (Ubuntu)
+## Requirements
 
 - Python 3.10+
 - `mpv` (preferred) or `ffmpeg`/`ffplay`
-- A Melodify session token + device headers (see below)
+- A Melodify session token + device headers (see Configure)
+
+### Ubuntu
 
 ```bash
 sudo apt update
 sudo apt install -y python3 python3-pip python3-venv mpv \
-  python3-gi gir1.2-glib-2.0  # for OS media keys (MPRIS)
+  python3-gi gir1.2-glib-2.0   # system PyGObject for MPRIS (do not pip-build it)
 ```
 
-## Install / update
+### macOS
+
+```bash
+brew install mpv python
+# Apple Silicon / Homebrew Python is fine; system python3 also works on recent macOS
+```
+
+## Install (recommended: pipx + release wheel)
+
+No clone or manual venv required. Grab a wheel from the [GitHub Releases](https://github.com/OWNER/REPO/releases) page (or build one with `./scripts/build-release.sh`), then:
+
+### Ubuntu
+
+```bash
+sudo apt update
+sudo apt install -y mpv pipx python3-gi gir1.2-glib-2.0
+pipx ensurepath
+
+# One-liner once a release exists (replace OWNER/REPO and version):
+pipx install "https://github.com/OWNER/REPO/releases/download/v0.2.0/melodify-0.2.0-py3-none-any.whl"
+
+# Optional MPRIS (GNOME/KDE media keys) — inject into the pipx env:
+pipx inject melodify StrEnum 'emoji>=2.8,<3' 'pydbus>=0.6,<0.7' 'unidecode>=1.3,<2'
+pipx inject --pip-args='--no-deps' melodify mpris-server
+
+melodify doctor
+```
+
+Or download the `.whl` from the release assets and run `pipx install ./melodify-0.2.0-py3-none-any.whl`.
+
+### macOS
+
+```bash
+brew install mpv pipx
+pipx ensurepath
+
+pipx install "https://github.com/OWNER/REPO/releases/download/v0.2.0/melodify-0.2.0-py3-none-any.whl"
+
+# Optional Now Playing / media keys:
+pipx inject melodify 'pyobjc-framework-MediaPlayer>=10'
+
+melodify doctor
+```
+
+`OWNER/REPO` is a placeholder until the public repository URL is set. Until then, build a wheel locally:
+
+```bash
+./scripts/build-release.sh          # writes dist/*.whl
+pipx install dist/melodify-*-py3-none-any.whl
+```
+
+PyPI publish is a later option (`pipx install melodify`); packaging already exposes the `melodify` console entry point.
+
+### Dev install from a clone
+
+#### Ubuntu
 
 ```bash
 cd /path/to/this/repo
 git pull
-# --system-site-packages so PyGObject (apt python3-gi) is visible for MPRIS
+
+# Critical: system-site-packages so apt's python3-gi (`gi`) is visible in the venv.
 python3 -m venv --system-site-packages .venv
 source .venv/bin/activate
-pip install -e .
-# or, if already installed:
-# pip install -e . --force-reinstall --no-deps
-melodify doctor   # verifies OS media (MPRIS) wiring
+
+pip install -e ".[mpris]"            # core + pure-Python MPRIS deps
+pip install --no-deps mpris-server   # uses apt PyGObject — do not omit --no-deps
+
+melodify doctor
 ```
+
+#### macOS
+
+```bash
+cd /path/to/this/repo
+git pull
+
+python3 -m venv .venv
+source .venv/bin/activate
+
+pip install -e ".[macos]"   # core + PyObjC MediaPlayer (Now Playing / media keys)
+
+melodify doctor
+```
+
+Data files live under:
+
+| OS | Path |
+|---|---|
+| Linux | `~/.local/share/melodify/` |
+| macOS | `~/Library/Application Support/melodify/` |
+
+On macOS, if you previously used the Linux-style `~/.local/share/melodify/` path, files are copied into Application Support on first use.
 
 ## Configure
 
@@ -54,10 +136,11 @@ Optional:
 | `MELODIFY_API_BASE` | `https://melodify.pw/api/desktop/v9` |
 | `MELODIFY_APP_VERSION` | `9.1.3` |
 | `MELODIFY_PWA_VERSION` | `9.2.6 Desktop` |
-| `MELODIFY_PLATFORM` | `Linux-Desktop` |
+| `MELODIFY_PLATFORM` | `Linux-Desktop` or `Mac-Desktop` (auto) |
 | `MELODIFY_STREAM_QUALITY` | `320` |
 | `MELODIFY_PLAYER` | `mpv` |
-| `MELODIFY_MPRIS` | `1` (set `0` to disable OS media controls) |
+| `MELODIFY_MPRIS` | `1` (Linux; set `0` to disable MPRIS) |
+| `MELODIFY_NOWPLAYING` | `1` (macOS; set `0` to disable Now Playing) |
 
 **Never commit `.env`.** Tokens grant access to your Melodify account.
 
@@ -88,8 +171,10 @@ Melodify’s PWA “recently listened” list is **offline** (local Redux/Indexe
 
 | File | Purpose |
 |---|---|
-| `~/.local/share/melodify/recent.json` | Recently played list (deduped by track id, capped at 50) |
-| `~/.local/share/melodify/playback.json` | Scrubber positions for continue/seek |
+| `…/melodify/recent.json` | Recently played list (deduped by track id, capped at 50) |
+| `…/melodify/playback.json` | Scrubber positions for continue/seek |
+
+(`…` = `~/.local/share` on Linux, `~/Library/Application Support` on macOS.)
 
 - Every successful play start (and pause/stop/finish) **upserts** the track to the front of `recent.json`.
 - `melodify last` / TUI **Last played** prefer that local list. If it is empty, they fall back to online `getUserMostListenedTracks` (after a short `recently_listened` probe).
@@ -99,12 +184,12 @@ Melodify’s PWA “recently listened” list is **offline** (local Redux/Indexe
 
 ```
 ┌ Browse (search / lists)     │ Now playing + progress bar     ┐
-│ Songs · Artists · Albums    │ Queue (▶ current, upcoming)    │
-│ Last played                 │ Space pause · n/b next/prev    │
+│ Songs · Artists · Albums    │ Up next (▶ current + a few)    │
+│ Last played                 │ Space pause · n/b · u expand   │
 └─────────────────────────────┴────────────────────────────────┘
 ```
 
-Right pane updates from mpv IPC ~2×/sec while a track is playing.
+Progress/time refresh from mpv IPC ~5×/sec. The **Up next** panel is compact by default and only redraws when the queue index or contents change (not on every tick — that used to blink). Press `u` to expand/collapse upcoming rows.
 
 ### TUI keys
 
@@ -122,6 +207,7 @@ Right pane updates from mpv IPC ~2×/sec while a track is playing.
 | Space | Pause / resume (mpv IPC) |
 | `n` / `>` | Next in queue |
 | `b` / `<` | Previous in queue |
+| `u` | Toggle Up next compact ↔ expanded |
 | `←` / `→` | Seek −5s / +5s |
 | Shift+`←` / `→` | Seek −10s / +10s |
 | `-` / `=` | Volume down / up |
@@ -129,27 +215,32 @@ Right pane updates from mpv IPC ~2×/sec while a track is playing.
 | Backspace | Go back |
 | `q` | Quit |
 
-### OS media controls (MPRIS)
+### OS media controls
 
-Melodify already speaks the Linux media APIs: it publishes **MPRIS2** on the session D-Bus as `org.mpris.MediaPlayer2.Melodify` and installs `~/.local/share/applications/melodify.desktop`.
+#### Linux (MPRIS)
 
-That hooks into:
-
-- GNOME / KDE media popups (title, artist, artwork)
-- Keyboard media keys (play/pause, next, previous)
-- `playerctl` and other MPRIS clients (seek + volume when using `mpv`)
+Publishes **MPRIS2** as `org.mpris.MediaPlayer2.Melodify` (GNOME/KDE media popup, media keys, `playerctl`).
 
 ```bash
-# while Melodify is running on your desktop:
 playerctl -p Melodify status
 playerctl -p Melodify play-pause
-playerctl -p Melodify next
-
-# offline check (no Melodify account needed):
-melodify doctor
 ```
 
-Needs: `python3-gi`, `gir1.2-glib-2.0`, a real desktop session bus, and `mpris-server` (pulled in by `pip install -e .`). Use a venv with `--system-site-packages` so `gi` imports. Set `MELODIFY_MPRIS=0` to disable.
+Needs: apt `python3-gi` + `gir1.2-glib-2.0`, session D-Bus, `pip install -e ".[mpris]"`, then `pip install --no-deps mpris-server`. Set `MELODIFY_MPRIS=0` to disable.
+
+#### macOS (Now Playing)
+
+Uses Apple’s **MediaPlayer** framework (via PyObjC) so Melodify appears in **Control Center → Now Playing** and responds to keyboard media keys (play/pause, next, previous; scrub when the OS sends a seek).
+
+```bash
+pip install -e ".[macos]"   # pulls pyobjc-framework-MediaPlayer
+```
+
+Limitations: artwork in Control Center is best-effort (title/artist/duration always set). Headless SSH sessions without a GUI won’t show Now Playing. Set `MELODIFY_NOWPLAYING=0` to disable.
+
+```bash
+melodify doctor   # platform-aware (MPRIS on Linux, Now Playing on macOS)
+```
 
 ### Long lists / pagination
 
@@ -157,13 +248,13 @@ Melodify’s API returns about **40 items per page**. The client automatically f
 
 ### Pagination / Load more
 
-Melodify APIs return pages (~40 tracks). The TUI loads the first page, then:
+Melodify APIs return ~40 items per page. On open, Melodify **auto-prefetches** further pages in the background until the API says `end` or **500** items (status shows `Loaded 80…`).
 
-- Scroll onto the bottom **── Load more (m) ──** row, press **`m`**, **PgDn/End** at the bottom, or click **Load more**
+- Beyond 500 (or if prefetch stopped early), use **`m`**, **Load more**, or the bottom **── Load more ──** row
 - New rows **append** (already-loaded tracks stay)
-- Playing from a list uses the **full loaded set** as the queue; near the end of the queue Melodify **prefetches** the next page when the API still has more (`end: false`)
+- Playing from a list uses the **full loaded set** as the queue; near the end of the queue Melodify also pulls the next page when more exist
 
-Applies to: search Songs/Artists/Albums, artist Songs/Albums, album tracks, and online last-played (local recent is already complete).
+Auto-prefetch applies to: search Songs/Artists/Albums, artist Songs/Albums, album tracks, and online last-played (local recent is already complete).
 
 ### Play queue
 
@@ -172,6 +263,7 @@ When you play a song from **search results**, **artist tracks**, **album tracks*
 - **No wrap** at the edges — next at the end / prev at the start is a no-op (with a short notice).
 - When the current track ends, Melodify **auto-advances** to the next queue item if one exists.
 - If more Melodify pages exist for that list, they are pulled into the queue automatically when you get close to the end.
+- The right pane shows a quiet **Up next** strip (current + a few upcoming), not a full flashing queue list. `u` expands it.
 
 ### CLI playback controls
 
@@ -213,9 +305,24 @@ Base: `https://melodify.pw/api/desktop/v9`
 
 See internal notes (agent store) for reverse-engineering details.
 
+## Releases / packaging
+
+| Piece | Role |
+|---|---|
+| `pyproject.toml` | Package metadata + `melodify` entry point (`melodify = melodify.cli:main`) |
+| `scripts/build-release.sh` | Build sdist + wheel into `dist/` (optional version bump: `./scripts/build-release.sh 0.2.1`) |
+| `.github/workflows/release.yml` | On tag `v*`, build artifacts and attach them to a GitHub Release |
+| `docs/RELEASE_NOTES.md` | User-facing notes template + checklist |
+
+**Tag a release (GitHub):** bump version → commit → `git tag v0.2.0 && git push origin v0.2.0`. CI attaches the wheel/sdist.
+
+**Origin:** Origin-native release file attach can be limited. Preferred path is GitHub Releases (above) or run `./scripts/build-release.sh` and upload `dist/*.whl` / `dist/*.tar.gz` to whatever release UI your forge provides. See `docs/RELEASE_NOTES.md`.
+
 ## Troubleshooting
 
 - **Missing env vars** — copy `.env.example` → `.env` and fill all four required keys.
 - **Auth rejected (401/403)** — refresh the token from a logged-in desktop.melodify.app session.
 - **502 / timeouts** — Melodify’s API is occasionally flaky; retry.
 - **No sound** — confirm `mpv` works (`mpv --version`) and your session has stream rights for the track.
+- **Next track waits ~30s** — fixed in 0.2.0 (EOF via mpv `eof-reached`, not process exit). Upgrade the wheel or pull latest.
+- **Song restarts after ~30s on manual play** — fixed in 0.2.0 (play before `/listens` + generation guards). Upgrade or pull latest.

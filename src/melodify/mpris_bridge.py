@@ -38,6 +38,10 @@ StartupNotify=false
 
 def ensure_desktop_entry() -> Path | None:
     """Install ~/.local/share/applications/melodify.desktop for GNOME/KDE media UIs."""
+    from .paths import is_linux
+
+    if not is_linux():
+        return None
     try:
         apps = Path.home() / ".local" / "share" / "applications"
         apps.mkdir(parents=True, exist_ok=True)
@@ -139,7 +143,10 @@ class MelodifyMpris:
             from mpris_server.events import EventAdapter
             from mpris_server.server import Server
         except ImportError as exc:
-            self.last_error = f"mpris-server not installed ({exc}). pip install mpris-server"
+            self.last_error = (
+                f"mpris-server not installed ({exc}). "
+                "Run: pip install -e '.[mpris]' && pip install --no-deps mpris-server"
+            )
             log.info("MPRIS unavailable (install mpris-server): %s", exc)
             return False
 
@@ -376,100 +383,6 @@ class MelodifyMpris:
         self.notify(all_props=True)
         return True
 
-
-def diagnose_os_media() -> list[tuple[str, bool, str]]:
-    """Return (check, ok, detail) rows for `melodify doctor`."""
-    rows: list[tuple[str, bool, str]] = []
-
-    mpris_env = os.environ.get("MELODIFY_MPRIS", "1").strip().lower()
-    enabled = mpris_env not in {"0", "false", "no", "off"}
-    rows.append(
-        (
-            "MELODIFY_MPRIS",
-            enabled,
-            "enabled" if enabled else f"disabled ({mpris_env!r})",
-        )
-    )
-
-    try:
-        import mpris_server  # noqa: F401
-
-        rows.append(("mpris-server", True, "import ok"))
-    except ImportError as exc:
-        rows.append(("mpris-server", False, f"missing — pip install mpris-server ({exc})"))
-
-    try:
-        import gi
-
-        gi.require_version("Gio", "2.0")
-        from gi.repository import Gio  # noqa: F401
-
-        rows.append(("PyGObject (gi)", True, "import ok"))
-    except Exception as exc:  # noqa: BLE001
-        rows.append(
-            (
-                "PyGObject (gi)",
-                False,
-                f"missing — sudo apt install python3-gi gir1.2-glib-2.0 ({exc})",
-            )
-        )
-
-    bus = os.environ.get("DBUS_SESSION_BUS_ADDRESS")
-    user_bus = Path(f"/run/user/{os.getuid()}/bus")
-    if bus:
-        rows.append(("D-Bus session", True, bus))
-    elif user_bus.exists():
-        rows.append(("D-Bus session", True, str(user_bus)))
-    else:
-        rows.append(
-            (
-                "D-Bus session",
-                False,
-                "not found — run inside a desktop login (GNOME/KDE), not a bare SSH)",
-            )
-        )
-
-    desktop = ensure_desktop_entry()
-    rows.append(
-        (
-            "Desktop entry",
-            desktop is not None and desktop.exists(),
-            str(desktop) if desktop else "could not write ~/.local/share/applications/melodify.desktop",
-        )
-    )
-
-    playerctl = shutil.which("playerctl")
-    rows.append(
-        (
-            "playerctl",
-            playerctl is not None,
-            playerctl or "optional — sudo apt install playerctl",
-        )
-    )
-
-    mpv = shutil.which("mpv")
-    rows.append(("mpv", mpv is not None, mpv or "sudo apt install mpv"))
-
-    # Live publish probe (only when deps look OK).
-    if enabled and all(ok for name, ok, _ in rows if name in {"mpris-server", "PyGObject (gi)", "D-Bus session"}):
-        probe = MelodifyMpris()
-        ok = probe.start()
-        if ok:
-            rows.append(
-                (
-                    "MPRIS publish",
-                    True,
-                    "org.mpris.MediaPlayer2.Melodify — try: playerctl -p Melodify status",
-                )
-            )
-            probe.stop()
-        else:
-            rows.append(("MPRIS publish", False, probe.last_error or "failed"))
-    else:
-        rows.append(("MPRIS publish", False, "skipped (fix earlier failures first)"))
-
-    return rows
-
     def stop(self) -> None:
         with self._lock:
             server = self._server
@@ -554,6 +467,122 @@ def diagnose_os_media() -> list[tuple[str, bool, str]]:
             fn(actions)
         except Exception:  # noqa: BLE001
             log.debug("MPRIS action failed", exc_info=True)
+
+
+def diagnose_os_media() -> list[tuple[str, bool, str]]:
+    """Return (check, ok, detail) rows for `melodify doctor`."""
+    rows: list[tuple[str, bool, str]] = []
+
+    mpris_env = os.environ.get("MELODIFY_MPRIS", "1").strip().lower()
+    enabled = mpris_env not in {"0", "false", "no", "off"}
+    rows.append(
+        (
+            "MELODIFY_MPRIS",
+            enabled,
+            "enabled" if enabled else f"disabled ({mpris_env!r})",
+        )
+    )
+
+    try:
+        import gi
+
+        gi.require_version("Gio", "2.0")
+        from gi.repository import Gio  # noqa: F401
+
+        rows.append(("PyGObject (gi)", True, "system import ok (apt python3-gi)"))
+    except Exception as exc:  # noqa: BLE001
+        rows.append(
+            (
+                "PyGObject (gi)",
+                False,
+                "missing — sudo apt install python3-gi gir1.2-glib-2.0; "
+                "recreate venv with: python3 -m venv --system-site-packages .venv "
+                f"({exc})",
+            )
+        )
+
+    try:
+        import mpris_server  # noqa: F401
+
+        rows.append(("mpris-server", True, "import ok"))
+    except ImportError as exc:
+        rows.append(
+            (
+                "mpris-server",
+                False,
+                "missing — pip install -e '.[mpris]' "
+                "&& pip install --no-deps mpris-server "
+                f"({exc})",
+            )
+        )
+
+    bus = os.environ.get("DBUS_SESSION_BUS_ADDRESS")
+    user_bus = Path(f"/run/user/{os.getuid()}/bus")
+    if bus:
+        rows.append(("D-Bus session", True, bus))
+    elif user_bus.exists():
+        rows.append(("D-Bus session", True, str(user_bus)))
+    else:
+        rows.append(
+            (
+                "D-Bus session",
+                False,
+                "not found — run inside a desktop login (GNOME/KDE), not a bare SSH)",
+            )
+        )
+
+    desktop = ensure_desktop_entry()
+    rows.append(
+        (
+            "Desktop entry",
+            desktop is not None and desktop.exists(),
+            str(desktop) if desktop else "could not write ~/.local/share/applications/melodify.desktop",
+        )
+    )
+
+    playerctl = shutil.which("playerctl")
+    rows.append(
+        (
+            "playerctl",
+            playerctl is not None,
+            playerctl or "optional — sudo apt install playerctl",
+        )
+    )
+
+    mpv = shutil.which("mpv")
+    rows.append(("mpv", mpv is not None, mpv or "sudo apt install mpv"))
+
+    # Live publish probe (only when deps look OK).
+    if enabled and all(
+        ok
+        for name, ok, _ in rows
+        if name in {"mpris-server", "PyGObject (gi)", "D-Bus session"}
+    ):
+        probe = MelodifyMpris()
+        try:
+            ok = probe.start()
+        except Exception as exc:  # noqa: BLE001
+            rows.append(("MPRIS publish", False, f"crashed: {exc}"))
+            try:
+                probe.stop()
+            except Exception:  # noqa: BLE001
+                pass
+            return rows
+        if ok:
+            rows.append(
+                (
+                    "MPRIS publish",
+                    True,
+                    "org.mpris.MediaPlayer2.Melodify — try: playerctl -p Melodify status",
+                )
+            )
+            probe.stop()
+        else:
+            rows.append(("MPRIS publish", False, probe.last_error or "failed"))
+    else:
+        rows.append(("MPRIS publish", False, "skipped (fix earlier failures first)"))
+
+    return rows
 
 
 def build_direct_actions(

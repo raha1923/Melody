@@ -42,9 +42,11 @@ def detect_player(preferred: str = "mpv") -> PlayerBackend:
         binary = shutil.which(key)
         if binary:
             return PlayerBackend(name=key, binary=binary)
+    import sys
+
+    hint = "brew install mpv" if sys.platform == "darwin" else "sudo apt install mpv"
     raise PlayerError(
-        "No stream player found. Install mpv (preferred) or ffmpeg/ffplay: "
-        "sudo apt install mpv"
+        "No stream player found. Install mpv (preferred) or ffmpeg/ffplay: " + hint
     )
 
 
@@ -139,6 +141,7 @@ class StreamPlayer:
                 "--terminal=no",
                 "--really-quiet",
                 "--idle=no",
+                "--keep-open=no",
                 "--cache=yes",
                 "--demuxer-max-bytes=8MiB",
                 "--demuxer-readahead-secs=5",
@@ -259,6 +262,32 @@ class StreamPlayer:
         if isinstance(value, (int, float)):
             return float(value)
         return None
+
+    def reached_eof(self) -> bool:
+        """True when mpv has finished the current file (even if the process lingers).
+
+        HTTP streams often keep the process alive for tens of seconds after audio
+        ends while the connection drains — waiting on ``is_alive`` alone causes
+        a long auto-advance gap. Prefer the ``eof-reached`` IPC property.
+        """
+        if not self.supports_ipc:
+            return not self.is_alive
+        if not self.is_alive:
+            return True
+        try:
+            eof = self._ipc_get("eof-reached")
+            if eof is True:
+                return True
+        except PlayerError:
+            pass
+        try:
+            pos = self.get_position()
+            dur = self.get_duration()
+        except PlayerError:
+            return False
+        if pos is None or dur is None or dur <= 0:
+            return False
+        return pos >= max(0.0, dur - 0.4)
 
     def status(self) -> PlaybackStatus:
         if not self.is_alive:

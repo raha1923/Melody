@@ -418,13 +418,16 @@ class MelodifyClient:
         ]
 
     def record_listen(self, track: Track, *, is_demo: bool = False) -> None:
-        """Notify Melodify that a track was listened to (same as PWA ``/listens``)."""
+        """Notify Melodify that a track was listened to (same as PWA ``/listens``).
+
+        Kept non-blocking for the play path: one attempt, short failure budget.
+        """
         try:
             self._request(
                 "POST",
                 "/listens",
                 json={"track_id": track.id, "is_demo": is_demo},
-                retries=2,
+                retries=1,
             )
         except MelodifyAPIError:
             # Non-fatal: playback should still work if listen accounting fails.

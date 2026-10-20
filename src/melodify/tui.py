@@ -31,8 +31,10 @@ from .api import MelodifyAPIError, MelodifyClient
 from .config import Settings
 from .history import resolve_listening_history
 from .models import Album, Artist, ListeningHistory, Track
-from .mpris_bridge import MelodifyMpris, MprisActions
-from .paging import ListPager
+from .mpris_bridge import MprisActions
+from .os_media import create_media_bridge
+from .paths import data_dir
+from .paging import PREFETCH_CAP, ListPager
 from .player import PlayerError, StreamPlayer
 from .progress import ProgressStore
 from .queue import PlayQueue
@@ -263,7 +265,11 @@ class SelectableList(ListView):
 
 
 class PlayerChrome(Vertical):
-    """nvlc-style now-playing + progress + queue panel."""
+    """Now-playing + progress + quiet compact Up next (not rebuilt on IPC ticks)."""
+
+    # Compact default; expanded shows more upcoming. Toggle with `u`.
+    COMPACT_UPCOMING = 3
+    EXPANDED_UPCOMING = 12
 
     DEFAULT_CSS = """
     PlayerChrome {
@@ -294,20 +300,41 @@ class PlayerChrome(Vertical):
         color: #7dd3fc;
         height: 1;
     }
-    #np-queue {
-        height: 1fr;
-        border: tall #1e293b;
-        margin: 0;
+    #np-upnext {
+        height: auto;
+        max-height: 14;
+        color: #cbd5e1;
+        padding: 0 0 0 0;
     }
     """
 
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._expanded = False
+        # Dirty-check caches so the 0.2s IPC tick only touches time/progress.
+        self._last_title: str | None = None
+        self._last_meta: str | None = None
+        self._last_time: str | None = None
+        self._last_bar: int | None = None
+        self._last_queue_sig: tuple[Any, ...] | None = None
+
     def compose(self) -> ComposeResult:
         yield Label("Not playing — pick a song to start the queue.", id="np-title")
-        yield Label("Space pause · n/b next/prev · ←/→ seek · -/= vol", id="np-meta")
+        yield Label("Space pause · n/b next/prev · ←/→ seek · -/= vol · u Up next", id="np-meta")
         yield Label("--:-- / --:--", id="np-time")
         yield ProgressBar(id="np-bar", total=1000, show_eta=False, show_percentage=False)
-        yield Label("Queue (empty)", id="np-queue-label")
-        yield ListView(id="np-queue")
+        yield Label("Up next", id="np-queue-label")
+        yield Static(
+            "Queue empty — play from search, artist, album, or last.",
+            id="np-upnext",
+        )
+
+    def toggle_expanded(self) -> bool:
+        """Flip compact ↔ expanded Up next. Returns new expanded state."""
+        self._expanded = not self._expanded
+        # Force queue redraw on next refresh.
+        self._last_queue_sig = None
+        return self._expanded
 
     def refresh_state(
         self,
@@ -321,53 +348,95 @@ class PlayerChrome(Vertical):
     ) -> None:
         title = queue.current
         if title is None:
-            self.query_one("#np-title", Label).update(
-                "Not playing — pick a song to start the queue."
-            )
-            self.query_one("#np-meta", Label).update(
-                "Space pause · n/b next/prev · ←/→ seek · -/= vol"
-            )
-            self.query_one("#np-time", Label).update("--:-- / --:--")
-            bar = self.query_one("#np-bar", ProgressBar)
-            bar.update(progress=0)
-            self.query_one("#np-queue-label", Label).update("Queue (empty)")
-            self._render_queue([])
+            self._set_title("Not playing — pick a song to start the queue.")
+            self._set_meta("Space pause · n/b next/prev · ←/→ seek · -/= vol · u Up next")
+            self._set_time("--:-- / --:--")
+            self._set_bar(0)
+            self._refresh_up_next(queue)
             return
 
         state = "Paused" if paused else ("Playing" if playing else "Stopped")
         vol = f" · vol {volume:.0f}%" if volume is not None else ""
-        self.query_one("#np-title", Label).update(f"{state}: {title.label()}")
-        self.query_one("#np-meta", Label).update(
-            f"Queue {queue.label()}{vol} · Space pause · n/b next/prev"
+        self._set_title(f"{state}: {title.label()}")
+        self._set_meta(
+            f"{queue.label()}{vol} · Space pause · n/b next/prev · u Up next"
         )
-        self.query_one("#np-time", Label).update(
-            f"{_fmt_time(position)} / {_fmt_time(duration)}"
-        )
-        bar = self.query_one("#np-bar", ProgressBar)
+        self._set_time(f"{_fmt_time(position)} / {_fmt_time(duration)}")
         if duration and duration > 0 and position is not None:
-            bar.update(progress=min(1000, int((position / duration) * 1000)))
+            self._set_bar(min(1000, int((position / duration) * 1000)))
         else:
-            bar.update(progress=0)
+            self._set_bar(0)
 
-        self.query_one("#np-queue-label", Label).update(
-            f"Queue · {queue.label()} · auto-advances on end (no wrap)"
-        )
-        self._render_queue(queue.tracks, current_index=queue.index)
+        # Queue panel: only when index / contents / expand mode change — never
+        # clear+rebuild a ListView on every progress tick (that caused the blink).
+        self._refresh_up_next(queue)
 
-    def _render_queue(self, tracks: list[Track], *, current_index: int = -1) -> None:
-        view = self.query_one("#np-queue", ListView)
-        view.clear()
-        if not tracks:
-            view.append(ListItem(Label("Queue empty — play from search, artist, album, or last.")))
+    def _set_title(self, text: str) -> None:
+        if text == self._last_title:
             return
-        # Show a window around the current track so the list stays readable.
-        start = max(0, current_index - 2)
-        end = min(len(tracks), start + 8)
-        start = max(0, end - 8)
-        for i in range(start, end):
-            track = tracks[i]
-            marker = "▶ " if i == current_index else "  "
-            view.append(ListItem(Label(f"{marker}{i + 1}. {track.label()}")))
+        self._last_title = text
+        self.query_one("#np-title", Label).update(text)
+
+    def _set_meta(self, text: str) -> None:
+        if text == self._last_meta:
+            return
+        self._last_meta = text
+        self.query_one("#np-meta", Label).update(text)
+
+    def _set_time(self, text: str) -> None:
+        if text == self._last_time:
+            return
+        self._last_time = text
+        self.query_one("#np-time", Label).update(text)
+
+    def _set_bar(self, progress: int) -> None:
+        if progress == self._last_bar:
+            return
+        self._last_bar = progress
+        self.query_one("#np-bar", ProgressBar).update(progress=progress)
+
+    def _up_next_window(self, queue: PlayQueue) -> list[tuple[int, Track, bool]]:
+        """Rows to show: current (▶) plus a few upcoming. No past tracks."""
+        if not queue.tracks or queue.current is None:
+            return []
+        upcoming = self.EXPANDED_UPCOMING if self._expanded else self.COMPACT_UPCOMING
+        rows: list[tuple[int, Track, bool]] = [
+            (queue.index, queue.tracks[queue.index], True)
+        ]
+        for i in range(queue.index + 1, min(len(queue.tracks), queue.index + 1 + upcoming)):
+            rows.append((i, queue.tracks[i], False))
+        return rows
+
+    def _refresh_up_next(self, queue: PlayQueue) -> None:
+        rows = self._up_next_window(queue)
+        sig: tuple[Any, ...] = (
+            queue.index,
+            len(queue.tracks),
+            queue.source,
+            self._expanded,
+            tuple((i, t.id) for i, t, _ in rows),
+        )
+        if sig == self._last_queue_sig:
+            return
+        self._last_queue_sig = sig
+
+        mode = "expanded" if self._expanded else "compact"
+        remaining = queue.remaining()
+        if not rows:
+            label = "Up next"
+            body = "Queue empty — play from search, artist, album, or last."
+        else:
+            more = max(0, remaining - (len(rows) - 1))
+            extra = f" · +{more} more" if more else ""
+            label = f"Up next · {queue.label()} · {mode}{extra} · u toggle"
+            lines: list[str] = []
+            for i, track, is_current in rows:
+                marker = "▶" if is_current else " "
+                lines.append(f"{marker} {i + 1}. {track.label()}")
+            body = "\n".join(lines)
+
+        self.query_one("#np-queue-label", Label).update(label)
+        self.query_one("#np-upnext", Static).update(body)
 
 
 class SearchScreen(Screen):
@@ -520,15 +589,20 @@ class SearchScreen(Screen):
                 self.set_loading(
                     False,
                     "No local recently-played tracks yet (and online history is empty). "
-                    "Play something first — Melodify saves them under ~/.local/share/melodify/.",
+                    f"Play something first — Melodify saves them under {data_dir()}/.",
                 )
             else:
-                more = "" if history.end else " · m / Load more for next page"
+                more = (
+                    ""
+                    if history.end
+                    else f" · loading up to {PREFETCH_CAP}…"
+                )
                 self.set_loading(
                     False,
                     f"{len(history.tracks)} tracks from {history.describe_source()}{more}. "
                     "↑↓/PgUp/PgDn scroll · Enter plays · c continues the first.",
                 )
+            app.schedule_prefetch(last_list)
 
         _call_ui(self, apply)
 
@@ -561,28 +635,32 @@ class SearchScreen(Screen):
 
         def apply() -> None:
             tracks = self.query_one("#track-list", SelectableList)
+            # Type-6 "end" is unreliable for continued type-1/2/3 paging — allow
+            # prefetch to discover the real end (or stop at PREFETCH_CAP).
             tracks.set_pager(
                 ListPager(
                     fetch=fetch_tracks,
                     items=list(results.tracks),
-                    end=results.end,
+                    end=not bool(results.tracks),
                     label=f'search “{query}” songs',
                 ),
                 focus=bool(results.tracks),
             )
-            self.query_one("#artist-list", SelectableList).set_pager(
+            artists = self.query_one("#artist-list", SelectableList)
+            artists.set_pager(
                 ListPager(
                     fetch=fetch_artists,
                     items=list(results.artists),
-                    end=results.end,
+                    end=not bool(results.artists),
                     label=f'search “{query}” artists',
                 )
             )
-            self.query_one("#album-list", SelectableList).set_pager(
+            albums = self.query_one("#album-list", SelectableList)
+            albums.set_pager(
                 ListPager(
                     fetch=fetch_albums,
                     items=list(results.albums),
-                    end=results.end,
+                    end=not bool(results.albums),
                     label=f'search “{query}” albums',
                 )
             )
@@ -590,11 +668,10 @@ class SearchScreen(Screen):
             if total == 0:
                 self.set_loading(False, f'No results for “{query}”. Try another spelling.')
             else:
-                more = "" if results.end else " · m / Load more for next page"
                 self.set_loading(
                     False,
                     f"Found {len(results.tracks)} songs, {len(results.artists)} artists, "
-                    f"{len(results.albums)} albums{more}. "
+                    f"{len(results.albums)} albums · loading up to {PREFETCH_CAP}…. "
                     "↑↓/PgUp/PgDn scroll · Enter opens · p plays.",
                 )
             try:
@@ -602,6 +679,9 @@ class SearchScreen(Screen):
                 tabs.active = "tab-tracks"
             except Exception:
                 pass
+            app.schedule_prefetch(tracks)
+            app.schedule_prefetch(artists)
+            app.schedule_prefetch(albums)
 
         _call_ui(self, apply)
 
@@ -692,7 +772,8 @@ class ArtistScreen(Screen):
                 ),
                 focus=bool(tracks),
             )
-            self.query_one("#artist-album-list", SelectableList).set_pager(
+            album_list = self.query_one("#artist-album-list", SelectableList)
+            album_list.set_pager(
                 ListPager(
                     fetch=fetch_albums,
                     items=list(albums),
@@ -703,12 +784,18 @@ class ArtistScreen(Screen):
             if not tracks and not albums:
                 self._set_status("This artist has no songs or albums available.", loading=False)
             else:
-                more = "" if tracks_end else " · m / Load more for next page"
+                more = (
+                    ""
+                    if tracks_end and albums_end
+                    else f" · loading up to {PREFETCH_CAP}…"
+                )
                 self._set_status(
                     f"{len(tracks)} songs · {len(albums)} albums{more}. "
                     "↑↓/PgUp/PgDn scroll · Enter plays · fills queue.",
                     loading=False,
                 )
+            app.schedule_prefetch(track_list)
+            app.schedule_prefetch(album_list)
 
         _call_ui(self, apply)
 
@@ -771,7 +858,8 @@ class AlbumScreen(Screen):
             return client.get_album_tracks(album_id, offset=offset)
 
         def apply() -> None:
-            self.query_one("#album-track-list", SelectableList).set_pager(
+            track_list = self.query_one("#album-track-list", SelectableList)
+            track_list.set_pager(
                 ListPager(
                     fetch=fetch_tracks,
                     items=list(tracks),
@@ -783,11 +871,12 @@ class AlbumScreen(Screen):
             if not tracks:
                 self._set_status("This album has no playable tracks.", loading=False)
             else:
-                more = "" if tracks_end else " · m / Load more for next page"
+                more = "" if tracks_end else f" · loading up to {PREFETCH_CAP}…"
                 self._set_status(
                     f"{len(tracks)} tracks{more}. ↑↓/PgUp/PgDn scroll · Enter or p plays.",
                     loading=False,
                 )
+            app.schedule_prefetch(track_list)
 
         _call_ui(self, apply)
 
@@ -874,6 +963,7 @@ class MelodifyApp(App[None]):
 
     BINDINGS = [
         Binding("q", "quit", "Quit"),
+        Binding("u", "toggle_up_next", "Up next"),
         Binding("p", "play_highlighted", "Play"),
         Binding("c", "continue_listening", "Continue"),
         Binding("space", "toggle_pause", "Pause"),
@@ -901,18 +991,26 @@ class MelodifyApp(App[None]):
         self.progress = ProgressStore()
         self.recent = RecentStore()
         self.queue = PlayQueue()
-        self.mpris = MelodifyMpris()
+        self.media = create_media_bridge()
+        # Alias kept so existing notify/sync call sites stay readable.
+        self.mpris = self.media
         self._last_track: Track | None = None
         self._expect_playback = False
         self._saw_alive = False
         self._playback_started_at = 0.0
         self._auto_advance = True
         self._prefetch_inflight = False
+        # Bumped on every play request so stale exclusive thread-workers cannot
+        # restart mpv after a slow /listens call (~30s restart bug).
+        self._play_generation = 0
+        self._last_select_id: int | None = None
+        self._last_select_at = 0.0
 
     def on_mount(self) -> None:
         self.push_screen(SearchScreen())
-        self.set_interval(0.5, self._on_player_tick)
-        self._start_mpris()
+        # Faster than 0.5s so EOF → next track feels immediate.
+        self.set_interval(0.2, self._on_player_tick)
+        self._start_os_media()
         missing = self.settings.missing()
         if missing:
             self.notify(
@@ -924,15 +1022,15 @@ class MelodifyApp(App[None]):
     def on_unmount(self) -> None:
         self._expect_playback = False
         self._persist_current_position(mark_recent=True)
-        self.mpris.stop()
+        self.media.stop()
         self.player.stop()
         self.client.close()
 
-    def _start_mpris(self) -> None:
+    def _start_os_media(self) -> None:
         app = self
 
         def _call(action: str) -> None:
-            # D-Bus thread → Textual thread.
+            # OS media thread → Textual thread.
             try:
                 app.call_from_thread(getattr(app, action))
             except RuntimeError:
@@ -952,7 +1050,7 @@ class MelodifyApp(App[None]):
                                 mark_last=True,
                             )
                     self.refresh_player_chrome()
-                    self.mpris.notify(seek=True)
+                    self.media.notify(seek=True)
                 except PlayerError as exc:
                     self.notify(str(exc), severity="warning", timeout=3)
 
@@ -966,7 +1064,7 @@ class MelodifyApp(App[None]):
                 try:
                     self.player.set_volume(level * 100.0)
                     self.refresh_player_chrome()
-                    self.mpris.notify(volume=True)
+                    self.media.notify(volume=True)
                 except PlayerError as exc:
                     self.notify(str(exc), severity="warning", timeout=3)
 
@@ -975,7 +1073,7 @@ class MelodifyApp(App[None]):
             except RuntimeError:
                 run()
 
-        self.mpris.attach(
+        self.media.attach(
             player=self.player,
             queue=self.queue,
             get_track=lambda: self._last_track,
@@ -991,14 +1089,18 @@ class MelodifyApp(App[None]):
             ),
         )
 
-        if self.mpris.start():
-            self.notify(
-                "OS media controls on — GNOME/KDE keys & playerctl (-p Melodify).",
-                timeout=4,
+        if self.media.start():
+            from .paths import is_macos
+
+            msg = (
+                "OS media controls on — Control Center / media keys."
+                if is_macos()
+                else "OS media controls on — GNOME/KDE keys & playerctl (-p Melodify)."
             )
-        elif self.mpris.last_error:
+            self.notify(msg, timeout=4)
+        elif getattr(self.media, "last_error", None):
             self.notify(
-                f"OS media controls off: {self.mpris.last_error}",
+                f"OS media controls off: {self.media.last_error}",
                 severity="warning",
                 timeout=8,
             )
@@ -1025,11 +1127,15 @@ class MelodifyApp(App[None]):
         try:
             if self.player.is_alive and self.player.is_paused:
                 self.player.resume()
-            elif self._last_track is not None and not self.player.is_alive:
-                self._play_track(self._last_track, from_queue=True)
-                return
             elif self.player.is_alive:
                 self.player.resume()
+            elif self._last_track is not None:
+                # OS media stacks sometimes echo Play right after we publish
+                # metadata; ignore that while a start is in flight.
+                if (time.time() - self._playback_started_at) < 2.5:
+                    return
+                self._play_track(self._last_track, start_seconds=0, from_queue=True)
+                return
             else:
                 self.notify("Nothing to resume — pick a song first.", severity="warning")
                 return
@@ -1077,10 +1183,107 @@ class MelodifyApp(App[None]):
             volume=status.volume,
         )
 
+    def action_toggle_up_next(self) -> None:
+        try:
+            chrome = self.screen.query_one("#player-chrome", PlayerChrome)
+        except Exception:
+            return
+        expanded = chrome.toggle_expanded()
+        self.refresh_player_chrome()
+        self.notify(
+            "Up next: expanded" if expanded else "Up next: compact",
+            timeout=1.5,
+        )
+
     def _on_player_tick(self) -> None:
+        # Progress/time may update every tick; Up next only redraws when the
+        # queue signature changes (see PlayerChrome._refresh_up_next).
         self.refresh_player_chrome()
         self._maybe_prefetch_queue()
         self._watch_playback_end()
+
+    def schedule_prefetch(self, lv: SelectableList) -> None:
+        """Background-fetch pages until end or PREFETCH_CAP (500)."""
+        pager = lv.pager
+        if pager is None or pager.end or len(pager.items) >= PREFETCH_CAP:
+            return
+        if pager.prefetching:
+            return
+        self.run_worker(
+            partial(self._prefetch_list_worker, lv),
+            exclusive=False,
+            thread=True,
+        )
+
+    def _prefetch_list_worker(self, lv: SelectableList) -> None:
+        pager = lv.pager
+        if pager is None or pager.end or len(pager.items) >= PREFETCH_CAP:
+            return
+
+        def on_progress(count: int, ended: bool) -> None:
+            def apply() -> None:
+                lv.apply_pager_state(keep_index=True)
+                if lv.kind == "track" and self.queue.pager is pager:
+                    self.queue.extend_unique(
+                        [t for t in pager.items if isinstance(t, Track)]
+                    )
+                    self.refresh_player_chrome()
+                try:
+                    status = self.screen.query_one("#status", Static)
+                    suffix = ""
+                    if ended:
+                        suffix = " · done"
+                    elif count >= PREFETCH_CAP:
+                        suffix = f" · cap {PREFETCH_CAP} (m for more)"
+                    else:
+                        suffix = "…"
+                    label = pager.label or "list"
+                    status.update(f"Loaded {count} · {label}{suffix}")
+                except Exception:
+                    pass
+
+            self.call_from_thread(apply)
+
+        try:
+            pager.prefetch_until(cap=PREFETCH_CAP, on_progress=on_progress)
+        except MelodifyAPIError as exc:
+            self.call_from_thread(
+                self.notify,
+                f"Prefetch stopped: {exc}",
+                severity="warning",
+                timeout=5,
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.call_from_thread(
+                self.notify,
+                f"Prefetch stopped: {exc}",
+                severity="warning",
+                timeout=5,
+            )
+
+        def done() -> None:
+            lv.apply_pager_state(keep_index=True)
+            if lv.kind == "track" and self.queue.pager is pager:
+                self.queue.extend_unique(
+                    [t for t in pager.items if isinstance(t, Track)]
+                )
+                self.refresh_player_chrome()
+            n = len(lv._items)
+            if pager.end:
+                detail = f"Loaded {n} · complete"
+            elif n >= PREFETCH_CAP:
+                detail = f"Loaded {n} (cap {PREFETCH_CAP}) · m / Load more for more"
+            else:
+                detail = f"Loaded {n}"
+            try:
+                self.screen.query_one("#status", Static).update(
+                    f"{detail} · {pager.label or 'list'}"
+                )
+            except Exception:
+                pass
+            self.notify(detail, timeout=3)
+
+        self.call_from_thread(done)
 
     def action_load_more(self) -> None:
         target = self._active_selectable_list()
@@ -1254,11 +1457,21 @@ class MelodifyApp(App[None]):
     def _watch_playback_end(self) -> None:
         if not self._expect_playback or not self._auto_advance:
             return
-        if self.player.is_alive:
+        alive = self.player.is_alive
+        eof = self.player.reached_eof() if alive or self._saw_alive else False
+        if alive and not eof:
             self._saw_alive = True
             return
         # Ignore the brief window before mpv is up, otherwise we'd skip tracks.
-        if not self._saw_alive or (time.time() - self._playback_started_at) < 1.5:
+        if not self._saw_alive or (time.time() - self._playback_started_at) < 1.0:
+            return
+        if alive and eof:
+            # Don't wait for HTTP keep-alive to tear down the process.
+            try:
+                self.player.stop()
+            except Exception:  # noqa: BLE001
+                pass
+        elif alive:
             return
         self._expect_playback = False
         self._saw_alive = False
@@ -1359,12 +1572,21 @@ class MelodifyApp(App[None]):
         track, queue_tracks, source, pager = context
         self.queue.load(queue_tracks, start=track, source=source)
         self._attach_queue_pager(pager)
-        self._play_track(track, from_queue=True)
+        self._play_track(track, start_seconds=0, from_queue=True)
 
     def on_track_selected(self, event: TrackSelected) -> None:
+        # Debounce duplicate Enter/Selected messages for the same track.
+        now = time.time()
+        if (
+            self._last_select_id == event.track.id
+            and (now - self._last_select_at) < 0.6
+        ):
+            return
+        self._last_select_id = event.track.id
+        self._last_select_at = now
         self.queue.load(event.queue, start=event.track, source=event.source or "list")
         self._attach_queue_pager(event.pager)
-        self._play_track(event.track, from_queue=True)
+        self._play_track(event.track, start_seconds=0, from_queue=True)
 
     def on_artist_selected(self, event: ArtistSelected) -> None:
         self.push_screen(ArtistScreen(event.artist))
@@ -1411,8 +1633,18 @@ class MelodifyApp(App[None]):
         if not from_queue and self.queue.current is None:
             self.queue.load([track], start=track, source="single")
         self._last_track = track
+        self._play_generation += 1
+        generation = self._play_generation
+        # Stop expecting the previous track so its end-watcher cannot race us.
+        self._expect_playback = False
+        self._saw_alive = False
         self.run_worker(
-            partial(self._play_worker, track, start_seconds=start_seconds),
+            partial(
+                self._play_worker,
+                track,
+                start_seconds=start_seconds,
+                generation=generation,
+            ),
             exclusive=True,
             thread=True,
         )
@@ -1438,7 +1670,7 @@ class MelodifyApp(App[None]):
         if not history.tracks:
             self.call_from_thread(
                 self.notify,
-                "Nothing to continue — play something first (saved under ~/.local/share/melodify/).",
+                f"Nothing to continue — play something first (saved under {data_dir()}/).",
                 severity="warning",
                 timeout=5,
             )
@@ -1471,10 +1703,12 @@ class MelodifyApp(App[None]):
             api_progress=track.progress_seconds,
             duration=track.duration,
         )
+        self._play_generation += 1
         self._play_worker(
             track,
             start_seconds=start,
             history_source=history.describe_source(),
+            generation=self._play_generation,
         )
 
     def _play_worker(
@@ -1483,7 +1717,11 @@ class MelodifyApp(App[None]):
         *,
         start_seconds: float | None = None,
         history_source: str | None = None,
+        generation: int = 0,
     ) -> None:
+        def _stale() -> bool:
+            return generation != 0 and generation != self._play_generation
+
         title = track.label()
         if start_seconds is None:
             start_seconds = self.progress.resolve_start_seconds(
@@ -1496,6 +1734,8 @@ class MelodifyApp(App[None]):
             resume_note = f" @ {_fmt_time(start_seconds)}"
         prefix = "Continuing" if history_source else "Starting"
         detail = f" ({history_source})" if history_source else ""
+        if _stale():
+            return
         self.call_from_thread(
             self.notify,
             f"{prefix}{detail}: {track.title}{resume_note} · {self.queue.label()}",
@@ -1504,6 +1744,8 @@ class MelodifyApp(App[None]):
         try:
             self._expect_playback = False
             url = self.client.build_play_url(track)
+            if _stale():
+                return
             headers = {
                 "authorization": self.settings.authorization,
                 "user-id": self.settings.user_id,
@@ -1512,7 +1754,6 @@ class MelodifyApp(App[None]):
                 "Origin": self.settings.origin,
                 "Referer": f"{self.settings.origin}/",
             }
-            self.client.record_listen(track)
             seek = float(start_seconds or 0)
             self.progress.save_position(
                 track.id,
@@ -1521,16 +1762,27 @@ class MelodifyApp(App[None]):
                 mark_last=True,
             )
             self.recent.upsert(track, position_seconds=seek)
+            if _stale():
+                return
+            # Start audio first — never block playback on /listens.
             self.player.play(
                 url,
                 title=title,
                 http_headers=headers,
                 start_seconds=seek,
             )
+            if _stale():
+                try:
+                    self.player.stop()
+                except Exception:  # noqa: BLE001
+                    pass
+                return
             self._saw_alive = False
             self._playback_started_at = time.time()
             self._expect_playback = True
         except (MelodifyAPIError, PlayerError) as exc:
+            if _stale():
+                return
             self._expect_playback = False
             self._saw_alive = False
             self.call_from_thread(
@@ -1539,6 +1791,13 @@ class MelodifyApp(App[None]):
                 severity="error",
                 timeout=6,
             )
+            return
+        # Fire-and-forget listen accounting (slow/hanging API must not re-enter play).
+        try:
+            self.client.record_listen(track)
+        except Exception:  # noqa: BLE001
+            pass
+        if _stale():
             return
         self.call_from_thread(self.refresh_player_chrome)
         self.call_from_thread(self.mpris.notify, title=True, playpause=True)

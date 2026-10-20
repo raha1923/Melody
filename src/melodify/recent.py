@@ -6,10 +6,11 @@ from pathlib import Path
 from typing import Any
 
 from .models import Artist, Mp3Link, Track
+from .paths import recent_path
 
 
 def default_recent_path() -> Path:
-    return Path.home() / ".local" / "share" / "melodify" / "recent.json"
+    return recent_path()
 
 
 class RecentStore:

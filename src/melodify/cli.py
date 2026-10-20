@@ -9,7 +9,8 @@ from .config import load_settings
 from .models import Track
 from .controls import interactive_playback_loop
 from .history import resolve_listening_history
-from .mpris_bridge import MelodifyMpris, build_direct_actions
+from .mpris_bridge import build_direct_actions
+from .os_media import create_media_bridge
 from .player import PlayerError, StreamPlayer, detect_player
 from .progress import ProgressStore
 from .queue import PlayQueue
@@ -291,11 +292,10 @@ def _stream_queue(
         )
         recent.upsert(current, position_seconds=pos)
 
-    mpris = MelodifyMpris()
+    media = create_media_bridge()
 
     def _play_track(track: Track, *, seek: float = 0.0) -> None:
         url = client.build_play_url(track, quality=quality)
-        client.record_listen(track)
         progress.save_position(
             track.id, seek, title=track.title, mark_last=True
         )
@@ -306,9 +306,13 @@ def _stream_queue(
             http_headers=headers,
             start_seconds=seek,
         )
-        mpris.notify(title=True, playpause=True)
+        try:
+            client.record_listen(track)
+        except Exception:  # noqa: BLE001
+            pass
+        media.notify(title=True, playpause=True)
 
-    mpris.attach(
+    media.attach(
         player=player,
         queue=queue,
         get_track=lambda: queue.current,
@@ -318,15 +322,15 @@ def _stream_queue(
             play_track=lambda track: _play_track(track, seek=0.0),
         ),
     )
-    if mpris.start():
-        print("OS media controls (MPRIS) enabled — playerctl -p Melodify …", flush=True)
-    elif mpris.last_error:
-        print(f"OS media controls off: {mpris.last_error}", flush=True)
+    if media.start():
+        print("OS media controls enabled.", flush=True)
+    elif getattr(media, "last_error", None):
+        print(f"OS media controls off: {media.last_error}", flush=True)
 
     first = queue.current
     if first is None:
         print("Queue is empty.", file=sys.stderr)
-        mpris.stop()
+        media.stop()
         return 1
     try:
         _play_track(first, seek=start_seconds)
@@ -335,10 +339,10 @@ def _stream_queue(
             on_position=_save_for_current,
             queue=queue,
             play_track=lambda track: _play_track(track, seek=0.0),
-            on_tick=mpris.sync_from_player,
+            on_tick=media.sync_from_player,
         )
     finally:
-        mpris.stop()
+        media.stop()
     current = queue.current
     if current is not None and not player.is_alive:
         pos = progress.get_position(current.id)
@@ -349,34 +353,50 @@ def _stream_queue(
 
 
 def _run_doctor() -> int:
-    from .mpris_bridge import diagnose_os_media
+    from .os_media import diagnose_os_media
+    from .paths import is_macos
 
     print(f"Melodify {__version__} — OS media / environment check\n")
     rows = diagnose_os_media()
     width = max(len(name) for name, _, _ in rows)
     failed = 0
+    critical = {
+        "mpv",
+        "MELODIFY_MPRIS",
+        "mpris-server",
+        "PyGObject (gi)",
+        "D-Bus session",
+        "MPRIS publish",
+        "MELODIFY_NOWPLAYING",
+        "MediaPlayer (PyObjC)",
+        "Now Playing",
+    }
     for name, ok, detail in rows:
         mark = "OK " if ok else "NO "
         print(f"  [{mark}] {name:<{width}}  {detail}")
-        if not ok and name != "playerctl":
-            # playerctl is optional helper; other failures matter for MPRIS.
-            if name in {
-                "MELODIFY_MPRIS",
-                "mpris-server",
-                "PyGObject (gi)",
-                "D-Bus session",
-                "MPRIS publish",
-                "mpv",
-            }:
-                failed += 1
-    print(
-        "\nOn your Ubuntu desktop, with Melodify playing:\n"
-        "  playerctl -p Melodify status\n"
-        "  playerctl -p Melodify play-pause\n"
-        "  playerctl -p Melodify next\n"
-        "\nTip: create the venv with system GI bindings:\n"
-        "  python3 -m venv --system-site-packages .venv\n"
-    )
+        if not ok and name in critical and name not in {"Homebrew", "playerctl"}:
+            failed += 1
+    if is_macos():
+        print(
+            "\nOn macOS, with Melodify playing:\n"
+            "  Check Control Center → Now Playing, or press media keys\n"
+            "\nInstall tips:\n"
+            "  brew install mpv\n"
+            "  python3 -m venv .venv && source .venv/bin/activate\n"
+            "  pip install -e '.[macos]'\n"
+        )
+    else:
+        print(
+            "\nOn your Ubuntu desktop, with Melodify playing:\n"
+            "  playerctl -p Melodify status\n"
+            "  playerctl -p Melodify play-pause\n"
+            "  playerctl -p Melodify next\n"
+            "\nIf PyGObject/mpris failed, use apt + --no-deps (do not pip-build cairo):\n"
+            "  sudo apt install -y python3-gi gir1.2-glib-2.0 playerctl\n"
+            "  python3 -m venv --system-site-packages .venv && source .venv/bin/activate\n"
+            "  pip install -e '.[mpris]'\n"
+            "  pip install --no-deps mpris-server\n"
+        )
     return 1 if failed else 0
 
 
