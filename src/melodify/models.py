@@ -88,6 +88,8 @@ class Track:
     mp3s: list[Mp3Link] = field(default_factory=list)
     image: str | None = None
     downloadable: bool = True
+    # Seconds into the track when Melodify exposes saved progress (often absent).
+    progress_seconds: float | None = None
 
     @classmethod
     def from_dict(cls, data: dict[str, Any] | None) -> Track | None:
@@ -115,6 +117,7 @@ class Track:
             mp3s=mp3s,
             image=_maybe_str(data.get("image")),
             downloadable=bool(data.get("downloadable", True)),
+            progress_seconds=_extract_progress_seconds(data),
         )
 
     def artist_names(self) -> str:
@@ -129,7 +132,11 @@ class Track:
         return f"{minutes}:{seconds:02d}"
 
     def label(self) -> str:
-        return f"{self.title} · {self.artist_names()} · {self.duration_label()}"
+        base = f"{self.title} · {self.artist_names()} · {self.duration_label()}"
+        if self.progress_seconds and self.progress_seconds > 0:
+            mins, secs = divmod(int(self.progress_seconds), 60)
+            return f"{base} · resume {mins}:{secs:02d}"
+        return base
 
     def stream_path(self, quality: str = "320") -> str | None:
         preferred = next((m for m in self.mp3s if m.quality == quality), None)
@@ -196,8 +203,64 @@ def _maybe_int(value: Any) -> int | None:
         return None
 
 
+def _maybe_float(value: Any) -> float | None:
+    if value is None or value == "":
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if number < 0:
+        return None
+    return number
+
+
+def _extract_progress_seconds(data: dict[str, Any]) -> float | None:
+    """Best-effort parse of saved playback position if the API ever sends it."""
+    candidates = (
+        "progress_seconds",
+        "played_seconds",
+        "last_position",
+        "last_position_seconds",
+        "seek_time",
+        "seek",
+        "position",
+        "current_second",
+        "listening_progress",
+        "resume_at",
+    )
+    for key in candidates:
+        value = _maybe_float(data.get(key))
+        if value is not None and value > 0:
+            return value
+    nested = data.get("progress") or data.get("playback") or data.get("listen")
+    if isinstance(nested, dict):
+        for key in candidates:
+            value = _maybe_float(nested.get(key))
+            if value is not None and value > 0:
+                return value
+        value = _maybe_float(nested.get("seconds"))
+        if value is not None and value > 0:
+            return value
+    return None
+
+
 def _maybe_str(value: Any) -> str | None:
     if value is None:
         return None
     text = str(value).strip()
     return text or None
+
+
+@dataclass
+class ListeningHistory:
+    tracks: list[Track]
+    source: str
+    end: bool = True
+
+    def describe_source(self) -> str:
+        if self.source == "recently_listened":
+            return "online recently listened"
+        if self.source == "most_listened":
+            return "online most-listened history"
+        return self.source

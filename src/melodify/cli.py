@@ -6,7 +6,9 @@ import sys
 from . import __version__
 from .api import MelodifyAPIError, MelodifyClient
 from .config import load_settings
+from .models import Track
 from .player import PlayerError, StreamPlayer, detect_player
+from .progress import ProgressStore
 from .tui import run_tui
 
 
@@ -43,12 +45,47 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="Stream quality: 320, 160, or 96 (default from env)",
     )
+    p_play.add_argument(
+        "--from",
+        dest="start_seconds",
+        type=float,
+        default=None,
+        help="Start at this many seconds (overrides saved progress)",
+    )
 
     p_artist = sub.add_parser("artist", help="Show artist profile + top tracks.")
     p_artist.add_argument("artist_id", type=int)
 
     p_album = sub.add_parser("album", help="List album tracks.")
     p_album.add_argument("album_id", type=int)
+
+    p_last = sub.add_parser(
+        "last",
+        help="List online listening history (recently listened / most listened).",
+    )
+    p_last.add_argument(
+        "--limit",
+        type=int,
+        default=25,
+        help="How many tracks to show (default: 25)",
+    )
+
+    p_continue = sub.add_parser(
+        "continue",
+        help="Resume the top online listening-history track (continue listening).",
+    )
+    p_continue.add_argument(
+        "--from",
+        dest="start_seconds",
+        type=float,
+        default=None,
+        help="Force start position in seconds (default: saved progress or 0)",
+    )
+    p_continue.add_argument(
+        "--quality",
+        default=None,
+        help="Stream quality: 320, 160, or 96 (default from env)",
+    )
 
     args = parser.parse_args(argv)
     settings = load_settings(args.env_file)
@@ -63,6 +100,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     command = args.command or "tui"
+    progress = ProgressStore()
 
     if command == "tui":
         try:
@@ -99,32 +137,89 @@ def main(argv: list[str] | None = None) -> int:
                 for track in tracks:
                     print(f"[{track.id}] {track.label()}")
                 return 0
+            if command == "last":
+                history = client.get_listening_history()
+                if not history.tracks:
+                    print(
+                        "No online listening history yet. Play something in Melodify "
+                        "(or here) so listens can accumulate."
+                    )
+                    return 0
+                print(f"Listening history ({history.describe_source()}):")
+                for track in history.tracks[: max(1, args.limit)]:
+                    start = progress.resolve_start_seconds(
+                        track.id,
+                        api_progress=track.progress_seconds,
+                        duration=track.duration,
+                    )
+                    suffix = ""
+                    if start > 0:
+                        mins, secs = divmod(int(start), 60)
+                        suffix = f" · saved @{mins}:{secs:02d}"
+                    print(f"  [{track.id}] {track.label()}{suffix}")
+                print(
+                    "\nTip: run `melodify continue` to resume the first track."
+                )
+                return 0
+            if command == "continue":
+                history = client.get_listening_history()
+                if not history.tracks:
+                    print(
+                        "Nothing to continue — online listening history is empty.",
+                        file=sys.stderr,
+                    )
+                    return 1
+                track = history.tracks[0]
+                start = (
+                    args.start_seconds
+                    if args.start_seconds is not None
+                    else progress.resolve_start_seconds(
+                        track.id,
+                        api_progress=track.progress_seconds,
+                        duration=track.duration,
+                    )
+                )
+                print(f"Continue ({history.describe_source()}): {track.label()}")
+                if start > 0:
+                    mins, secs = divmod(int(start), 60)
+                    print(f"Resuming at {mins}:{secs:02d}")
+                else:
+                    print("No saved position — starting from the beginning.")
+                return _stream_track(
+                    client,
+                    settings,
+                    track,
+                    quality=args.quality,
+                    start_seconds=start,
+                    progress=progress,
+                )
             if command == "play":
                 results = client.search(args.query, search_type=1)
                 if not results.tracks:
                     print(f'No tracks found for “{args.query}”.', file=sys.stderr)
                     return 1
                 track = results.tracks[0]
-                url = client.build_play_url(track, quality=args.quality)
+                start = (
+                    args.start_seconds
+                    if args.start_seconds is not None
+                    else progress.resolve_start_seconds(
+                        track.id,
+                        api_progress=track.progress_seconds,
+                        duration=track.duration,
+                    )
+                )
                 print(f"Playing: {track.label()}")
-                print(f"Player:  {settings.player}")
-                player = StreamPlayer(preferred=settings.player)
-                headers = {
-                    "authorization": settings.authorization,
-                    "user-id": settings.user_id,
-                    "device-id": settings.device_id,
-                    "device-token": settings.device_token,
-                    "Origin": settings.origin,
-                    "Referer": f"{settings.origin}/",
-                }
-                player.play(url, title=track.label(), http_headers=headers)
-                try:
-                    if player._proc is not None:
-                        player._proc.wait()
-                except KeyboardInterrupt:
-                    player.stop()
-                    print("\nStopped.")
-                return 0
+                if start > 0:
+                    mins, secs = divmod(int(start), 60)
+                    print(f"Resuming at {mins}:{secs:02d}")
+                return _stream_track(
+                    client,
+                    settings,
+                    track,
+                    quality=args.quality,
+                    start_seconds=start,
+                    progress=progress,
+                )
         except MelodifyAPIError as exc:
             print(f"API error: {exc}", file=sys.stderr)
             return 1
@@ -134,6 +229,52 @@ def main(argv: list[str] | None = None) -> int:
 
     parser.print_help()
     return 2
+
+
+def _stream_track(
+    client: MelodifyClient,
+    settings,
+    track: Track,
+    *,
+    quality: str | None,
+    start_seconds: float,
+    progress: ProgressStore,
+) -> int:
+    url = client.build_play_url(track, quality=quality)
+    print(f"Player:  {settings.player}")
+    player = StreamPlayer(preferred=settings.player)
+    headers = {
+        "authorization": settings.authorization,
+        "user-id": settings.user_id,
+        "device-id": settings.device_id,
+        "device-token": settings.device_token,
+        "Origin": settings.origin,
+        "Referer": f"{settings.origin}/",
+    }
+    # Mark listen online (same endpoint the PWA uses after ~15s of play).
+    client.record_listen(track)
+    progress.save_position(
+        track.id,
+        start_seconds,
+        title=track.title,
+        mark_last=True,
+    )
+    player.play(
+        url,
+        title=track.label(),
+        http_headers=headers,
+        start_seconds=start_seconds,
+    )
+    try:
+        if player._proc is not None:
+            player._proc.wait()
+        # Finished — clear resume point so a later continue starts fresh.
+        progress.clear_position(track.id)
+    except KeyboardInterrupt:
+        player.stop()
+        # Keep the start point we had; a fuller seek sync would need mpv IPC.
+        print("\nStopped.")
+    return 0
 
 
 def _print_search(results) -> None:

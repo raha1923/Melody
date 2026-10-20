@@ -7,7 +7,14 @@ from urllib.parse import urlencode
 import httpx
 
 from .config import Settings
-from .models import Album, Artist, SearchResults, Track, parse_search_result
+from .models import (
+    Album,
+    Artist,
+    ListeningHistory,
+    SearchResults,
+    Track,
+    parse_search_result,
+)
 
 
 class MelodifyAPIError(RuntimeError):
@@ -191,6 +198,103 @@ class MelodifyClient:
             if t is not None
         ]
         return tracks, bool(result.get("end", True))
+
+    def get_most_listened_tracks(
+        self, *, offset: int = 0
+    ) -> tuple[list[Track], bool]:
+        payload = self._request(
+            "POST",
+            "/getUserMostListenedTracks",
+            json={"offset": offset},
+        )
+        result = payload.get("result") or {}
+        tracks = [
+            t
+            for t in (Track.from_dict(raw) for raw in result.get("tracks") or [])
+            if t is not None
+        ]
+        return tracks, bool(result.get("end", True))
+
+    def get_playlist_tracks_by_type(
+        self, playlist_type: str, *, offset: int = 0
+    ) -> tuple[list[Track], bool]:
+        payload = self._request(
+            "POST",
+            "/getPlaylistTracksByType",
+            json={"offset": offset, "type": playlist_type},
+        )
+        result = payload.get("result")
+        if not result:
+            return [], True
+        tracks = [
+            t
+            for t in (Track.from_dict(raw) for raw in result.get("tracks") or [])
+            if t is not None
+        ]
+        return tracks, bool(result.get("end", True))
+
+    def get_listening_history(self, *, offset: int = 0) -> ListeningHistory:
+        """Fetch online listening history for continue / last-played.
+
+        The desktop PWA’s “اخیرا شنیده های من” UI is local Redux. Online, Melodify
+        aggregates listens via ``/getUserMostListenedTracks``. We briefly probe
+        ``getPlaylistTracksByType`` ``recently_listened`` (often ``result: null``
+        and sometimes slow) before falling back to most-listened.
+        """
+        try:
+            recent = self._probe_recently_listened(offset=offset)
+            if recent:
+                return ListeningHistory(
+                    tracks=recent, source="recently_listened", end=True
+                )
+        except MelodifyAPIError:
+            pass
+
+        tracks, end = self.get_most_listened_tracks(offset=offset)
+        return ListeningHistory(tracks=tracks, source="most_listened", end=end)
+
+    def _probe_recently_listened(self, *, offset: int = 0) -> list[Track]:
+        """Short-timeout probe — must not block continue/last on a hung endpoint."""
+        try:
+            response = self._client.post(
+                "/getPlaylistTracksByType",
+                json={"offset": offset, "type": "recently_listened"},
+                timeout=8.0,
+            )
+        except httpx.TimeoutException as exc:
+            raise MelodifyAPIError("recently_listened probe timed out") from exc
+        except httpx.HTTPError as exc:
+            raise MelodifyAPIError(f"recently_listened probe failed: {exc}") from exc
+        if response.status_code >= 400:
+            raise MelodifyAPIError(
+                f"recently_listened probe HTTP {response.status_code}",
+                status_code=response.status_code,
+            )
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise MelodifyAPIError("recently_listened returned non-JSON") from exc
+        result = payload.get("result") if isinstance(payload, dict) else None
+        if not result:
+            return []
+        return [
+            t
+            for t in (Track.from_dict(raw) for raw in result.get("tracks") or [])
+            if t is not None
+        ]
+
+    def record_listen(self, track: Track, *, is_demo: bool = False) -> None:
+        """Notify Melodify that a track was listened to (same as PWA ``/listens``)."""
+        try:
+            self._request(
+                "POST",
+                "/listens",
+                json={"track_id": track.id, "is_demo": is_demo},
+                retries=2,
+            )
+        except MelodifyAPIError:
+            # Non-fatal: playback should still work if listen accounting fails.
+            return
 
     def build_play_url(self, track: Track, *, quality: str | None = None) -> str:
         quality = quality or self.settings.stream_quality

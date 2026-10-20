@@ -71,7 +71,16 @@ melodify search "googoosh"
 melodify artist 251
 melodify album 926
 melodify play "برای من"
+melodify last                 # online listening history
+melodify continue             # resume top history track
 ```
+
+### Continue listening
+
+Melodify’s desktop “recently listened” screen is mostly **local** in the PWA, but listens are recorded online via `POST /listens` and aggregated in `POST /getUserMostListenedTracks`.
+
+- `melodify last` lists that online history (prefers `recently_listened` when the API returns tracks; otherwise most-listened).
+- `melodify continue` plays the first history track. If a saved position exists (API field or local `~/.local/share/melodify/playback.json`), playback seeks there; otherwise it starts at 0.
 
 ### TUI keys
 
@@ -79,6 +88,8 @@ melodify play "برای من"
 |---|---|
 | `/` | Focus search |
 | Enter | Search / open / play highlighted song |
+| `c` | Continue listening (online history) |
+| `l` | Load last-played list |
 | `p` | Play highlighted song |
 | `s` | Stop playback |
 | Backspace | Go back |
@@ -100,6 +111,9 @@ Base: `https://melodify.pw/api/desktop/v9`
 - `POST /getArtistTracks` — `{artist_id, offset, sort_by}`
 - `POST /getArtistAlbums` — `{artist_id, offset}`
 - `POST /getAlbumTracks` — `{album_id, offset}`
+- `POST /listens` — record a listen `{track_id, is_demo}`
+- `POST /getUserMostListenedTracks` — online listening history
+- `POST /getPlaylistTracksByType` — e.g. `type=recently_listened` / `most_listened`
 - Play: `GET https://cdn.melodify.pw/handle/v2/tracks/{hash}/{quality}/{device-token}?…`
 
 See internal notes (agent store) for reverse-engineering details.

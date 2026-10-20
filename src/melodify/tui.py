@@ -24,6 +24,7 @@ from .api import MelodifyAPIError, MelodifyClient
 from .config import Settings
 from .models import Album, Artist, Track
 from .player import PlayerError, StreamPlayer
+from .progress import ProgressStore
 
 
 def _status_line(text: str, *, tone: str = "dim") -> Static:
@@ -81,10 +82,14 @@ class SelectableList(ListView):
 class SearchScreen(Screen):
     BINDINGS = [
         Binding("slash", "focus_search", "Search", show=True),
+        Binding("c", "continue_listening", "Continue", show=True),
+        Binding("l", "load_last", "Last", show=True),
         Binding("escape", "clear_status", "Clear", show=False),
     ]
 
-    status_text = reactive("Type a query and press Enter to search Melodify.")
+    status_text = reactive(
+        "Search Melodify, or press c to continue listening / l for last played."
+    )
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=False)
@@ -95,6 +100,9 @@ class SearchScreen(Screen):
                 placeholder="Search Melodify…",
                 id="search-input",
             )
+            with Horizontal(id="home-actions"):
+                yield Button("Continue listening", id="btn-continue", variant="primary")
+                yield Button("Last played", id="btn-last", variant="default")
             yield Static(self.status_text, id="status")
             yield LoadingIndicator(id="loading")
             with TabbedContent(id="results-tabs"):
@@ -104,11 +112,28 @@ class SearchScreen(Screen):
                     yield SelectableList("artist", id="artist-list")
                 with TabPane("Albums", id="tab-albums"):
                     yield SelectableList("album", id="album-list")
+                with TabPane("Last played", id="tab-last"):
+                    yield SelectableList("track", id="last-list")
         yield Footer()
 
     def on_mount(self) -> None:
         self.query_one("#loading", LoadingIndicator).display = False
         self.query_one("#search-input", Input).focus()
+        self.run_worker(self._load_last(silent=True), exclusive=False, thread=True)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "btn-continue":
+            self.action_continue_listening()
+        elif event.button.id == "btn-last":
+            self.action_load_last()
+
+    def action_continue_listening(self) -> None:
+        app = self.app
+        assert isinstance(app, MelodifyApp)
+        app.action_continue_listening()
+
+    def action_load_last(self) -> None:
+        self.run_worker(self._load_last(silent=False), exclusive=True, thread=True)
 
     def watch_status_text(self, value: str) -> None:
         try:
@@ -133,6 +158,49 @@ class SearchScreen(Screen):
             self.status_text = "Enter a search term first."
             return
         self.run_worker(self._do_search(query), exclusive=True, thread=True)
+
+    def _load_last(self, *, silent: bool) -> None:
+        app = self.app
+        assert isinstance(app, MelodifyApp)
+        if not silent:
+            self.call_from_thread(
+                self.set_loading, True, "Loading online listening history…"
+            )
+        try:
+            history = app.client.get_listening_history()
+        except MelodifyAPIError as exc:
+            if not silent:
+                self.call_from_thread(
+                    self.set_loading, False, f"Could not load last played: {exc}"
+                )
+            return
+        except Exception as exc:  # noqa: BLE001
+            if not silent:
+                self.call_from_thread(
+                    self.set_loading, False, f"Unexpected error: {exc}"
+                )
+            return
+
+        def apply() -> None:
+            self.query_one("#last-list", SelectableList).set_items(history.tracks)
+            try:
+                tabs = self.query_one("#results-tabs", TabbedContent)
+                tabs.active = "tab-last"
+            except Exception:
+                pass
+            if not history.tracks:
+                self.set_loading(
+                    False,
+                    "No online listening history yet. Play tracks so Melodify can record listens.",
+                )
+            else:
+                self.set_loading(
+                    False,
+                    f"{len(history.tracks)} tracks from {history.describe_source()}. "
+                    "Enter plays · c continues the first.",
+                )
+
+        self.call_from_thread(apply)
 
     def _do_search(self, query: str) -> None:
         app = self.app
@@ -306,6 +374,10 @@ class MelodifyApp(App[None]):
     #search-input {
         margin: 0 1 1 1;
     }
+    #home-actions {
+        height: auto;
+        margin: 0 1 1 1;
+    }
     #status {
         margin: 0 1 1 1;
         color: #cbd5e1;
@@ -350,6 +422,7 @@ class MelodifyApp(App[None]):
     BINDINGS = [
         Binding("q", "quit", "Quit"),
         Binding("p", "play_highlighted", "Play"),
+        Binding("c", "continue_listening", "Continue"),
         Binding("s", "stop_playback", "Stop"),
         Binding("backspace", "go_back", "Back"),
     ]
@@ -359,6 +432,7 @@ class MelodifyApp(App[None]):
         self.settings = settings
         self.client = MelodifyClient(settings)
         self.player = StreamPlayer(preferred=settings.player)
+        self.progress = ProgressStore()
         self._last_track: Track | None = None
 
     def on_mount(self) -> None:
@@ -382,6 +456,9 @@ class MelodifyApp(App[None]):
     def action_stop_playback(self) -> None:
         self.player.stop()
         self.notify("Playback stopped.", timeout=2)
+
+    def action_continue_listening(self) -> None:
+        self.run_worker(self._continue_worker(), exclusive=True, thread=True)
 
     def action_play_highlighted(self) -> None:
         track = self._highlighted_track()
@@ -408,6 +485,7 @@ class MelodifyApp(App[None]):
             "#track-list",
             "#artist-track-list",
             "#album-track-list",
+            "#last-list",
         ):
             try:
                 widget = screen.query_one(list_id, SelectableList)
@@ -423,13 +501,74 @@ class MelodifyApp(App[None]):
                 return item
         return None
 
-    def _play_track(self, track: Track) -> None:
+    def _play_track(self, track: Track, *, start_seconds: float | None = None) -> None:
         self._last_track = track
-        self.run_worker(self._play_worker(track), exclusive=True, thread=True)
+        self.run_worker(
+            self._play_worker(track, start_seconds=start_seconds),
+            exclusive=True,
+            thread=True,
+        )
 
-    def _play_worker(self, track: Track) -> None:
+    def _continue_worker(self) -> None:
+        self.call_from_thread(
+            self.notify, "Fetching continue listening…", timeout=2
+        )
+        try:
+            history = self.client.get_listening_history()
+        except MelodifyAPIError as exc:
+            self.call_from_thread(
+                self.notify,
+                f"Continue failed: {exc}",
+                severity="error",
+                timeout=6,
+            )
+            return
+        if not history.tracks:
+            self.call_from_thread(
+                self.notify,
+                "No online listening history to continue.",
+                severity="warning",
+                timeout=5,
+            )
+            return
+        track = history.tracks[0]
+        self._last_track = track
+        start = self.progress.resolve_start_seconds(
+            track.id,
+            api_progress=track.progress_seconds,
+            duration=track.duration,
+        )
+        self._play_worker(
+            track,
+            start_seconds=start,
+            history_source=history.describe_source(),
+        )
+
+    def _play_worker(
+        self,
+        track: Track,
+        *,
+        start_seconds: float | None = None,
+        history_source: str | None = None,
+    ) -> None:
         title = track.label()
-        self.call_from_thread(self.notify, f"Starting stream: {track.title}", timeout=2)
+        if start_seconds is None:
+            start_seconds = self.progress.resolve_start_seconds(
+                track.id,
+                api_progress=track.progress_seconds,
+                duration=track.duration,
+            )
+        resume_note = ""
+        if start_seconds > 0:
+            mins, secs = divmod(int(start_seconds), 60)
+            resume_note = f" @ {mins}:{secs:02d}"
+        prefix = "Continuing" if history_source else "Starting stream"
+        detail = f" ({history_source})" if history_source else ""
+        self.call_from_thread(
+            self.notify,
+            f"{prefix}{detail}: {track.title}{resume_note}",
+            timeout=3,
+        )
         try:
             url = self.client.build_play_url(track)
             headers = {
@@ -440,7 +579,19 @@ class MelodifyApp(App[None]):
                 "Origin": self.settings.origin,
                 "Referer": f"{self.settings.origin}/",
             }
-            self.player.play(url, title=title, http_headers=headers)
+            self.client.record_listen(track)
+            self.progress.save_position(
+                track.id,
+                float(start_seconds or 0),
+                title=track.title,
+                mark_last=True,
+            )
+            self.player.play(
+                url,
+                title=title,
+                http_headers=headers,
+                start_seconds=float(start_seconds or 0),
+            )
         except (MelodifyAPIError, PlayerError) as exc:
             self.call_from_thread(
                 self.notify,

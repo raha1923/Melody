@@ -39,6 +39,7 @@ class StreamPlayer:
         self.backend = detect_player(preferred)
         self._proc: subprocess.Popen[bytes] | None = None
         self.now_playing: str | None = None
+        self.start_seconds: float = 0.0
 
     @property
     def is_playing(self) -> bool:
@@ -57,10 +58,18 @@ class StreamPlayer:
         self._proc = None
         self.now_playing = None
 
-    def play(self, url: str, *, title: str | None = None, http_headers: dict[str, str] | None = None) -> None:
+    def play(
+        self,
+        url: str,
+        *,
+        title: str | None = None,
+        http_headers: dict[str, str] | None = None,
+        start_seconds: float = 0.0,
+    ) -> None:
         self.stop()
         headers = http_headers or {}
         header_blob = "\r\n".join(f"{k}: {v}" for k, v in headers.items())
+        start = max(0.0, float(start_seconds or 0.0))
 
         if self.backend.name == "mpv":
             cmd = [
@@ -73,6 +82,8 @@ class StreamPlayer:
                 "--demuxer-max-bytes=8MiB",
                 "--demuxer-readahead-secs=5",
             ]
+            if start > 0:
+                cmd.append(f"--start={start}")
             if title:
                 cmd.append(f"--force-media-title={title}")
             if header_blob:
@@ -87,6 +98,8 @@ class StreamPlayer:
                 "-loglevel",
                 "error",
             ]
+            if start > 0:
+                cmd.extend(["-ss", str(start)])
             if header_blob:
                 cmd.extend(["-headers", header_blob + "\r\n"])
             cmd.extend(["-i", url])
@@ -100,3 +113,4 @@ class StreamPlayer:
         except OSError as exc:
             raise PlayerError(f"Failed to start {self.backend.name}: {exc}") from exc
         self.now_playing = title or url
+        self.start_seconds = start
