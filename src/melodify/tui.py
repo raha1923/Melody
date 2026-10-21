@@ -886,9 +886,12 @@ class AlbumScreen(Screen):
 class LoginScreen(Screen):
     """Phone + OTP when no session is available."""
 
+    # priority=True so focused Inputs don't swallow q / escape / ctrl+c.
     BINDINGS = [
-        Binding("q", "quit", "Quit"),
-        Binding("escape", "quit", "Quit", show=False),
+        Binding("q", "quit_app", "Quit", show=True, priority=True),
+        Binding("escape", "quit_app", "Quit", show=True, priority=True),
+        Binding("ctrl+c", "quit_app", "Quit", show=False, priority=True),
+        Binding("ctrl+q", "quit_app", "Quit", show=False, priority=True),
     ]
 
     DEFAULT_CSS = """
@@ -939,7 +942,8 @@ class LoginScreen(Screen):
             yield Static(
                 "Sign in with your Melodify phone number (SMS code).\n"
                 "Or run `melodify login` in a terminal.\n"
-                f"Session file: {session_path()}",
+                f"Session file: {session_path()}\n"
+                "Quit: q · Esc · Ctrl+C · or the Quit button.",
                 id="login-help",
             )
             yield Input(placeholder="Phone 09xxxxxxxxx", id="login-phone")
@@ -951,12 +955,19 @@ class LoginScreen(Screen):
             with Horizontal(id="login-actions"):
                 yield Button("Send code", id="btn-send-code", variant="primary")
                 yield Button("Verify & save", id="btn-verify", variant="success")
+                yield Button("Quit", id="btn-quit", variant="error")
             yield Static("Enter your phone, then Send code.", id="login-status")
 
     def on_mount(self) -> None:
         self.query_one("#login-phone", Input).focus()
 
+    def action_quit_app(self) -> None:
+        self.app.exit()
+
     def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "btn-quit":
+            self.app.exit()
+            return
         if event.button.id == "btn-send-code":
             self._send_code()
         elif event.button.id == "btn-verify":
@@ -1096,7 +1107,9 @@ class MelodifyApp(App[None]):
     """
 
     BINDINGS = [
-        Binding("q", "quit", "Quit"),
+        Binding("q", "quit", "Quit", priority=True),
+        Binding("ctrl+c", "quit", "Quit", show=False, priority=True),
+        Binding("ctrl+q", "quit", "Quit", show=False, priority=True),
         Binding("u", "toggle_up_next", "Up next"),
         Binding("p", "play_highlighted", "Play"),
         Binding("c", "continue_listening", "Continue"),
