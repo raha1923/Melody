@@ -69,15 +69,31 @@ def _write_json(path: Path, payload: dict[str, Any]) -> None:
 
 
 def load_or_create_device(*, default_name: str) -> DeviceIdentity:
-    """Stable per-install device-id (not the old shared sample forever)."""
+    """Stable per-install device-id (not the old shared sample forever).
+
+    ``device_name`` is refreshed to the current PWA-shaped default so login
+    headers stay aligned (e.g. ``Mac OS 14.x (os)``) even if an older CLI
+    name was stored.
+    """
     path = device_path()
     if path.exists():
         try:
             raw = json.loads(path.read_text(encoding="utf-8"))
             device_id = str(raw.get("device_id") or "").strip()
-            device_name = str(raw.get("device_name") or default_name).strip() or default_name
             if device_id:
-                return DeviceIdentity(device_id=device_id, device_name=device_name)
+                identity = DeviceIdentity(
+                    device_id=device_id, device_name=default_name
+                )
+                if str(raw.get("device_name") or "") != default_name:
+                    _write_json(
+                        path,
+                        {
+                            **raw,
+                            "device_id": identity.device_id,
+                            "device_name": identity.device_name,
+                        },
+                    )
+                return identity
         except (OSError, json.JSONDecodeError, TypeError, ValueError):
             pass
 

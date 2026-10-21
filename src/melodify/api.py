@@ -45,10 +45,13 @@ class MelodifyClient:
         self.close()
 
     def _auth_headers(self) -> dict[str, str]:
+        from .config import PWA_USER_AGENT, PWA_USER_DEVICE_INFO
+
         s = self.settings
         return {
             "Accept": "application/json",
             "Content-Type": "application/json",
+            "User-Agent": PWA_USER_AGENT,
             "authorization": s.authorization,
             "user-id": s.user_id,
             "device-id": s.device_id,
@@ -59,7 +62,7 @@ class MelodifyClient:
             "pwa-version": s.pwa_version,
             "Origin": s.origin,
             "Referer": f"{s.origin}/",
-            "user-device-info": "screen_w:1280-screen_h:720-terminal:1",
+            "user-device-info": PWA_USER_DEVICE_INFO,
         }
 
     def _request(

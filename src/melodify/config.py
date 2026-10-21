@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import platform as py_platform
 import sys
 from dataclasses import dataclass
 
@@ -12,11 +13,52 @@ DEFAULT_API_BASE = "https://melodify.pw/api/desktop/v9"
 DEFAULT_ORIGIN = "https://desktop.melodify.app"
 DEFAULT_APP_VERSION = "9.1.3"
 DEFAULT_PWA_VERSION = "9.2.6 Desktop"
-DEFAULT_PLATFORM = "Mac-Desktop" if sys.platform == "darwin" else "Linux-Desktop"
-DEFAULT_DEVICE_NAME = (
-    "Melodify CLI (Mac)" if sys.platform == "darwin" else "Melodify CLI (Linux)"
-)
 DEFAULT_STREAM_QUALITY = "320"
+
+# Browser UA — Melodify edge/WAF is happier when getSms looks like the desktop PWA.
+PWA_USER_AGENT = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    if sys.platform == "darwin"
+    else (
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    )
+)
+
+# PWA quirk: `user-device-info` uses screen_w twice (width then height).
+PWA_USER_DEVICE_INFO = "screen_w:1280-screen_w:720"
+
+
+def pwa_os_name() -> str:
+    """Match react-device-detect / PWA ``osName`` (``Mac OS``, ``Linux``, …)."""
+    if sys.platform == "darwin":
+        return "Mac OS"
+    if sys.platform.startswith("win"):
+        return "Windows"
+    return "Linux"
+
+
+def pwa_os_version() -> str:
+    """Best-effort OS version string for ``DEVICE_NAME`` (``… (os)``)."""
+    if sys.platform == "darwin":
+        ver = py_platform.mac_ver()[0] or py_platform.release()
+        return ver or "10.15.7"
+    return py_platform.release() or "osVersion"
+
+
+def pwa_platform() -> str:
+    """PWA ``platform`` header: ``{osName}-Desktop`` e.g. ``Mac OS-Desktop``."""
+    return f"{pwa_os_name()}-Desktop"
+
+
+def pwa_device_name() -> str:
+    """PWA ``device-name``: ``{osName} {osVersion} (os)``."""
+    return f"{pwa_os_name()} {pwa_os_version()} (os)"
+
+
+DEFAULT_PLATFORM = pwa_platform()
+DEFAULT_DEVICE_NAME = pwa_device_name()
 
 
 @dataclass(frozen=True)
@@ -90,15 +132,18 @@ def load_settings(env_file: str | None = ".env") -> Settings:
 
     device_name = (
         os.getenv("MELODIFY_DEVICE_NAME", "").strip()
-        or (session.device_name if session else "")
         or device.device_name
         or DEFAULT_DEVICE_NAME
     )
-    platform = (
-        os.getenv("MELODIFY_PLATFORM", "").strip()
-        or (session.platform if session else "")
-        or DEFAULT_PLATFORM
-    )
+    # Prefer live PWA-shaped platform; remap legacy CLI values (Mac-Desktop → Mac OS-Desktop).
+    env_platform = os.getenv("MELODIFY_PLATFORM", "").strip()
+    session_platform = (session.platform if session else "").strip()
+    platform = env_platform or DEFAULT_PLATFORM
+    if not env_platform and session_platform in {"Mac-Desktop", "Darwin-Desktop"}:
+        platform = "Mac OS-Desktop"
+    elif not env_platform and session_platform:
+        # Keep non-legacy session platform only if it already looks PWA-shaped.
+        platform = session_platform if session_platform.endswith("-Desktop") else DEFAULT_PLATFORM
 
     return Settings(
         authorization=authorization,

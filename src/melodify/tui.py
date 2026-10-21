@@ -993,8 +993,11 @@ class LoginScreen(Screen):
     def _send_code_worker(self, phone_raw: str) -> None:
         try:
             phone = normalize_phone(phone_raw)
-            device = load_or_create_device(default_name=self.app.settings.device_name)
-            with AuthClient(device, platform=self.app.settings.platform) as client:
+            from .config import DEFAULT_DEVICE_NAME
+
+            device = load_or_create_device(default_name=DEFAULT_DEVICE_NAME)
+            # AuthClient uses PWA-aligned platform / device-name / UA (not legacy Mac-Desktop).
+            with AuthClient(device) as client:
                 msg = client.request_otp(phone)
             self._phone = phone
             self._awaiting_code = True

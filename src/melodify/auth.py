@@ -19,7 +19,11 @@ from .config import (
     DEFAULT_ORIGIN,
     DEFAULT_PLATFORM,
     DEFAULT_PWA_VERSION,
+    PWA_USER_AGENT,
+    PWA_USER_DEVICE_INFO,
     Settings,
+    pwa_device_name,
+    pwa_platform,
 )
 from .session import (
     DeviceIdentity,
@@ -65,21 +69,30 @@ def normalize_phone(raw: str) -> str:
     # 10 digits: 9xxxxxxxxx
     return "0" + digits
 
-def _public_headers(device: DeviceIdentity, *, platform: str = DEFAULT_PLATFORM) -> dict[str, str]:
+def _public_headers(
+    device: DeviceIdentity,
+    *,
+    platform: str | None = None,
+    device_name: str | None = None,
+) -> dict[str, str]:
+    """Headers for pre-auth calls — mirrors a successful desktop PWA ``/getSms``.
+
+    Notably: **no** ``authorization`` / ``user-id`` (omitted, not empty strings).
+    ``device-token`` is present but empty. Platform is ``Mac OS-Desktop`` on macOS.
+    """
     return {
         "Accept": "application/json",
         "Content-Type": "application/json",
-        "authorization": "",
-        "user-id": "",
+        "User-Agent": PWA_USER_AGENT,
         "device-id": device.device_id,
         "device-token": "",
-        "device-name": device.device_name,
-        "platform": platform,
+        "device-name": device_name or device.device_name or pwa_device_name(),
+        "platform": platform or pwa_platform(),
         "app-version": DEFAULT_APP_VERSION,
         "pwa-version": DEFAULT_PWA_VERSION,
         "Origin": DEFAULT_ORIGIN,
         "Referer": f"{DEFAULT_ORIGIN}/",
-        "user-device-info": "screen_w:1280-screen_h:720-terminal:1",
+        "user-device-info": PWA_USER_DEVICE_INFO,
     }
 
 
@@ -102,15 +115,20 @@ class AuthClient:
         device: DeviceIdentity,
         *,
         api_base: str = DEFAULT_API_BASE,
-        platform: str = DEFAULT_PLATFORM,
+        platform: str | None = None,
+        device_name: str | None = None,
         timeout: float = 60.0,
     ):
         self.device = device
-        self.platform = platform
+        # Prefer PWA-shaped defaults so login matches desktop.melodify.app.
+        self.platform = platform or pwa_platform()
+        self.device_name = device_name or device.device_name or pwa_device_name()
         self._client = httpx.Client(
             base_url=api_base.rstrip("/"),
             timeout=timeout,
-            headers=_public_headers(device, platform=platform),
+            headers=_public_headers(
+                device, platform=self.platform, device_name=self.device_name
+            ),
             follow_redirects=True,
         )
 
@@ -133,13 +151,18 @@ class AuthClient:
         device_token: str = "",
         retries: int = 1,
     ) -> dict[str, Any]:
-        headers = {
-            "authorization": authorization,
-            "user-id": str(user_id or ""),
-            "device-token": device_token or "",
+        # Pre-auth: omit empty authorization/user-id (empty strings can 502 getSms).
+        # Post-verify: send real token + user-id. device-token may be "".
+        headers: dict[str, str] = {
+            "device-token": device_token if device_token is not None else "",
             "device-id": self.device.device_id,
-            "device-name": self.device.device_name,
+            "device-name": self.device_name,
+            "platform": self.platform,
         }
+        if authorization:
+            headers["authorization"] = authorization
+        if user_id:
+            headers["user-id"] = str(user_id)
         last_error: AuthError | None = None
         attempts = max(1, retries)
         for attempt in range(1, attempts + 1):
@@ -248,7 +271,7 @@ class AuthClient:
             {
                 "app_version": DEFAULT_APP_VERSION,
                 "device_id": self.device.device_id,
-                "device_name": self.device.device_name,
+                "device_name": self.device_name,
             },
             authorization=authorization,
             user_id=user_id,
@@ -312,8 +335,8 @@ def finalize_login(
         user_id=str(init_user.get("id") or user_id),
         device_id=device.device_id,
         device_token=device_token,
-        device_name=device.device_name,
-        platform=DEFAULT_PLATFORM,
+        device_name=client.device_name,
+        platform=client.platform,
         full_name=str(init_user.get("full_name") or user.get("full_name") or ""),
         phone=str(init_user.get("phone") or phone),
         logged_in_at=datetime.now(timezone.utc).isoformat(),
