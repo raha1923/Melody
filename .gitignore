@@ -1,4 +1,6 @@
 .env
+.env.*
+!.env.example
 .venv/
 venv/
 __pycache__/
@@ -14,3 +16,8 @@ build/
 .DS_Store
 melodify-bundle.js
 src/melodify.egg-info/
+# Local Melodify session (never commit)
+session.json
+device.json
+**/session.json
+**/device.json
