@@ -9,6 +9,14 @@ The release workflow attaches `dist/*.whl` and `dist/*.tar.gz` when a `v*` tag i
 
 - **`melodify login`** — phone + SMS OTP (same as desktop.melodify.app). Persists `session.json` (0600) under the OS data dir. Also `logout` / `whoami`.
 - TUI shows a login screen when unauthenticated. `.env` tokens remain optional overrides.
+- AuthClient headers aligned with desktop PWA (`Mac OS-Desktop`, omit empty auth on `/getSms`).
+
+### Install
+
+```bash
+pipx install "https://github.com/raha1923/Melody/releases/download/v0.3.0/melodify-0.3.0-py3-none-any.whl"
+melodify login
+```
 
 ## v0.2.1
 
@@ -27,23 +35,14 @@ The release workflow attaches `dist/*.whl` and `dist/*.tar.gz` when a `v*` tag i
 
 **Ubuntu / macOS (pipx from a release wheel):**
 
-```bash
-# Replace OWNER/REPO and VERSION with the release you downloaded
-pipx install "https://github.com/OWNER/REPO/releases/download/v0.2.0/melodify-0.2.0-py3-none-any.whl"
-```
+Prefer the **v0.3.0** install one-liner above (repo: [raha1923/Melody](https://github.com/raha1923/Melody)).
 
-Or download the `.whl` from the release page, then:
-
-```bash
-pipx install ./melodify-0.2.0-py3-none-any.whl
-```
-
-Still need `mpv` (and Melodify session env — see README). On Ubuntu for MPRIS: apt `python3-gi` + `gir1.2-glib-2.0`, then `pipx inject melodify StrEnum emoji pydbus unidecode` and `pipx inject --pip-args='--no-deps' melodify mpris-server`. On macOS for Now Playing: `pipx inject melodify 'pyobjc-framework-MediaPlayer>=10'`.
+Still need `mpv`. On Ubuntu for MPRIS: apt `python3-gi` + `gir1.2-glib-2.0`, then `pipx inject` as in the README. On macOS for Now Playing: `pipx inject melodify 'pyobjc-framework-MediaPlayer>=10'`.
 
 ### Packaging
 
 - `scripts/build-release.sh` — local sdist/wheel build (optional version bump arg)
-- `.github/workflows/release.yml` — tag `v0.2.0` → GitHub Release + artifacts
+- `.github/workflows/release.yml` — tag `v0.3.0` → GitHub Release + artifacts
 
 ---
 

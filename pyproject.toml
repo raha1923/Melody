@@ -11,10 +11,9 @@ dependencies = [
 ]
 
 [project.urls]
-# Replace OWNER/REPO after the public GitHub (or Origin) repository exists.
-Homepage = "https://github.com/OWNER/REPO"
-Issues = "https://github.com/OWNER/REPO/issues"
-ReleaseNotes = "https://github.com/OWNER/REPO/blob/main/docs/RELEASE_NOTES.md"
+Homepage = "https://github.com/raha1923/Melody"
+Issues = "https://github.com/raha1923/Melody/issues"
+ReleaseNotes = "https://github.com/raha1923/Melody/blob/main/docs/RELEASE_NOTES.md"
 
 [project.optional-dependencies]
 # Pure-Python MPRIS helpers only. Do NOT list mpris-server / PyGObject here —
