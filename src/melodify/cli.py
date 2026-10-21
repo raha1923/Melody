@@ -5,34 +5,54 @@ import sys
 
 from . import __version__
 from .api import MelodifyAPIError, MelodifyClient
+from .auth import AuthError, interactive_login
 from .config import load_settings
 from .models import Track
 from .controls import interactive_playback_loop
 from .history import resolve_listening_history
 from .mpris_bridge import build_direct_actions
 from .os_media import create_media_bridge
+from .paths import data_dir
 from .player import PlayerError, StreamPlayer, detect_player
 from .progress import ProgressStore
 from .queue import PlayQueue
 from .recent import RecentStore
+from .session import clear_session, load_session, session_path
 from .tui import run_tui
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="melodify",
-        description="Ubuntu terminal music client for Melodify (search, browse, stream).",
+        description="Ubuntu/macOS terminal music client for Melodify (search, browse, stream).",
     )
     parser.add_argument("--version", action="version", version=f"melodify {__version__}")
     parser.add_argument(
         "--env-file",
         default=".env",
-        help="Path to .env file (default: ./.env)",
+        help="Optional legacy .env file (default: ./.env). Prefer `melodify login`.",
     )
 
     sub = parser.add_subparsers(dest="command")
 
     sub.add_parser("tui", help="Launch the interactive TUI (default).")
+
+    p_login = sub.add_parser(
+        "login",
+        help="Log in with phone + SMS code (saves session under the OS data dir).",
+    )
+    p_login.add_argument(
+        "--phone",
+        default=None,
+        help="Iranian mobile (09xxxxxxxxx). Prompted if omitted.",
+    )
+    p_login.add_argument(
+        "--name",
+        default=None,
+        help="Display name for first-time registration only.",
+    )
+    sub.add_parser("logout", help="Clear the saved Melodify session.")
+    sub.add_parser("whoami", help="Show the active session (env or session file).")
 
     p_search = sub.add_parser("search", help="One-shot search in the terminal.")
     p_search.add_argument("query", help="Search query")
@@ -104,13 +124,52 @@ def main(argv: list[str] | None = None) -> int:
     if command == "doctor":
         return _run_doctor()
 
+    if command == "login":
+        try:
+            session = interactive_login(phone=args.phone, name=args.name)
+        except (AuthError, EOFError, KeyboardInterrupt) as exc:
+            if isinstance(exc, KeyboardInterrupt):
+                print("\nCancelled.", file=sys.stderr)
+                return 130
+            print(f"Login failed: {exc}", file=sys.stderr)
+            return 1
+        print(f"Logged in as {session.full_name or session.user_id}")
+        print(f"Session saved to {session_path()} (mode 0600)")
+        print("Run `melodify` or `melodify tui` to start.")
+        return 0
+
+    if command == "logout":
+        if clear_session():
+            print(f"Cleared session at {session_path()}")
+        else:
+            print("No session file to clear.")
+        print(
+            "Note: MELODIFY_* env vars in .env still override if set — unset them "
+            "or remove .env to fully sign out."
+        )
+        return 0
+
+    if command == "whoami":
+        return _run_whoami(args.env_file)
+
     settings = load_settings(args.env_file)
     missing = settings.missing()
+    if missing and command == "tui":
+        # TUI shows an in-app login screen when unauthenticated.
+        try:
+            detect_player(settings.player)
+        except PlayerError as exc:
+            print(str(exc), file=sys.stderr)
+            return 3
+        run_tui(settings)
+        return 0
     if missing:
         print(
-            "Missing required environment variables:\n  - "
-            + "\n  - ".join(missing)
-            + "\n\nCopy .env.example to .env and fill in your Melodify session values.",
+            "Not logged in (missing: "
+            + ", ".join(missing)
+            + ").\n\n"
+            "  melodify login\n\n"
+            "Legacy: copy .env.example → .env with session tokens (env overrides session).",
             file=sys.stderr,
         )
         return 2
@@ -349,6 +408,33 @@ def _stream_queue(
         duration = current.duration or 0
         if pos is None or (duration and pos >= max(duration - 3, 1)):
             progress.clear_position(current.id)
+    return 0
+
+
+def _run_whoami(env_file: str | None) -> int:
+    settings = load_settings(env_file)
+    session = load_session()
+    print(f"Auth source: {settings.auth_source}")
+    print(f"Data dir:    {data_dir()}")
+    print(f"Session:     {session_path()}" + (" (present)" if session else " (missing)"))
+    if not settings.authenticated:
+        print("Status:      not logged in — run `melodify login`")
+        return 1
+    name = ""
+    phone = ""
+    if session:
+        name = session.full_name
+        phone = session.phone
+    print(f"User id:     {settings.user_id}")
+    if name:
+        print(f"Name:        {name}")
+    if phone:
+        # Mask middle digits
+        masked = phone[:4] + "****" + phone[-3:] if len(phone) >= 8 else phone
+        print(f"Phone:       {masked}")
+    print(f"Device id:   {settings.device_id[:12]}…")
+    print(f"Device name: {settings.device_name}")
+    print(f"Platform:    {settings.platform}")
     return 0
 
 

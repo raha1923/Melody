@@ -28,7 +28,8 @@ from textual.widgets import (
 )
 
 from .api import MelodifyAPIError, MelodifyClient
-from .config import Settings
+from .auth import AuthClient, AuthError, complete_login, normalize_phone
+from .config import Settings, load_settings
 from .history import resolve_listening_history
 from .models import Album, Artist, ListeningHistory, Track
 from .mpris_bridge import MprisActions
@@ -39,6 +40,7 @@ from .player import PlayerError, StreamPlayer
 from .progress import ProgressStore
 from .queue import PlayQueue
 from .recent import RecentStore
+from .session import load_or_create_device, session_path
 
 
 def _fmt_time(seconds: float | None) -> str:
@@ -881,6 +883,160 @@ class AlbumScreen(Screen):
         _call_ui(self, apply)
 
 
+class LoginScreen(Screen):
+    """Phone + OTP when no session is available."""
+
+    # priority=True so focused Inputs don't swallow q / escape / ctrl+c.
+    BINDINGS = [
+        Binding("q", "quit_app", "Quit", show=True, priority=True),
+        Binding("escape", "quit_app", "Quit", show=True, priority=True),
+        Binding("ctrl+c", "quit_app", "Quit", show=False, priority=True),
+        Binding("ctrl+q", "quit_app", "Quit", show=False, priority=True),
+    ]
+
+    DEFAULT_CSS = """
+    LoginScreen {
+        align: center middle;
+        background: #0f172a;
+    }
+    #login-box {
+        width: 64;
+        max-width: 90%;
+        height: auto;
+        border: tall #334155;
+        background: #111827;
+        padding: 1 2;
+    }
+    #login-title {
+        text-style: bold;
+        color: #fde68a;
+        height: 1;
+        margin-bottom: 1;
+    }
+    #login-help {
+        color: #94a3b8;
+        margin-bottom: 1;
+    }
+    #login-status {
+        color: #7dd3fc;
+        margin: 1 0;
+        min-height: 2;
+    }
+    #login-phone, #login-code, #login-name {
+        margin: 0 0 1 0;
+    }
+    #login-actions {
+        height: 3;
+        margin-top: 1;
+    }
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._phone: str = ""
+        self._awaiting_code = False
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="login-box"):
+            yield Label("Melodify login", id="login-title")
+            yield Static(
+                "Sign in with your Melodify phone number (SMS code).\n"
+                "Or run `melodify login` in a terminal.\n"
+                f"Session file: {session_path()}\n"
+                "Quit: q · Esc · Ctrl+C · or the Quit button.",
+                id="login-help",
+            )
+            yield Input(placeholder="Phone 09xxxxxxxxx", id="login-phone")
+            yield Input(placeholder="SMS code (after send)", id="login-code")
+            yield Input(
+                placeholder="Display name (new accounts only)",
+                id="login-name",
+            )
+            with Horizontal(id="login-actions"):
+                yield Button("Send code", id="btn-send-code", variant="primary")
+                yield Button("Verify & save", id="btn-verify", variant="success")
+                yield Button("Quit", id="btn-quit", variant="error")
+            yield Static("Enter your phone, then Send code.", id="login-status")
+
+    def on_mount(self) -> None:
+        self.query_one("#login-phone", Input).focus()
+
+    def action_quit_app(self) -> None:
+        self.app.exit()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "btn-quit":
+            self.app.exit()
+            return
+        if event.button.id == "btn-send-code":
+            self._send_code()
+        elif event.button.id == "btn-verify":
+            self._verify()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id == "login-phone":
+            self._send_code()
+        elif event.input.id in {"login-code", "login-name"}:
+            self._verify()
+
+    def _set_status(self, text: str) -> None:
+        self.query_one("#login-status", Static).update(text)
+
+    def _send_code(self) -> None:
+        phone_raw = self.query_one("#login-phone", Input).value.strip()
+        self.run_worker(
+            partial(self._send_code_worker, phone_raw),
+            exclusive=True,
+            thread=True,
+        )
+
+    def _send_code_worker(self, phone_raw: str) -> None:
+        try:
+            phone = normalize_phone(phone_raw)
+            from .config import DEFAULT_DEVICE_NAME
+
+            device = load_or_create_device(default_name=DEFAULT_DEVICE_NAME)
+            # AuthClient uses PWA-aligned platform / device-name / UA (not legacy Mac-Desktop).
+            with AuthClient(device) as client:
+                msg = client.request_otp(phone)
+            self._phone = phone
+            self._awaiting_code = True
+            _call_ui(self, self._set_status, f"{msg}\nPhone: {phone}")
+            _call_ui(self, self.query_one("#login-code", Input).focus)
+        except AuthError as exc:
+            _call_ui(self, self._set_status, str(exc))
+        except Exception as exc:  # noqa: BLE001
+            _call_ui(
+                self,
+                self._set_status,
+                f"Could not send SMS ({exc}). Try again.",
+            )
+
+    def _verify(self) -> None:
+        phone_raw = self.query_one("#login-phone", Input).value.strip()
+        code = self.query_one("#login-code", Input).value.strip()
+        name = self.query_one("#login-name", Input).value.strip() or None
+        phone = self._phone or phone_raw
+        self.run_worker(
+            partial(self._verify_worker, phone, code, name),
+            exclusive=True,
+            thread=True,
+        )
+
+    def _verify_worker(self, phone: str, code: str, name: str | None) -> None:
+        try:
+            session = complete_login(phone=phone, code=code, full_name=name)
+            _call_ui(self, self.app.apply_session, session)
+        except AuthError as exc:
+            _call_ui(self, self._set_status, str(exc))
+        except Exception as exc:  # noqa: BLE001
+            _call_ui(
+                self,
+                self._set_status,
+                f"Login failed ({exc}). Try again.",
+            )
+
+
 class MelodifyApp(App[None]):
     TITLE = "Melodify"
     SUB_TITLE = "terminal player"
@@ -962,7 +1118,9 @@ class MelodifyApp(App[None]):
     """
 
     BINDINGS = [
-        Binding("q", "quit", "Quit"),
+        Binding("q", "quit", "Quit", priority=True),
+        Binding("ctrl+c", "quit", "Quit", show=False, priority=True),
+        Binding("ctrl+q", "quit", "Quit", show=False, priority=True),
         Binding("u", "toggle_up_next", "Up next"),
         Binding("p", "play_highlighted", "Play"),
         Binding("c", "continue_listening", "Continue"),
@@ -1007,17 +1165,55 @@ class MelodifyApp(App[None]):
         self._last_select_at = 0.0
 
     def on_mount(self) -> None:
-        self.push_screen(SearchScreen())
         # Faster than 0.5s so EOF → next track feels immediate.
         self.set_interval(0.2, self._on_player_tick)
-        self._start_os_media()
-        missing = self.settings.missing()
-        if missing:
+        if self.settings.authenticated:
+            self.push_screen(SearchScreen())
+            self._start_os_media()
+        else:
+            self.push_screen(LoginScreen())
             self.notify(
-                "Missing env: " + ", ".join(missing),
-                severity="error",
-                timeout=8,
+                "Not logged in — use the form or run `melodify login`.",
+                severity="warning",
+                timeout=6,
             )
+
+    def apply_session(self, session: Any) -> None:
+        """Called after LoginScreen succeeds — swap client + enter the app."""
+        from .session import Session as _Session
+
+        if not isinstance(session, _Session):
+            return
+        self.settings = load_settings()
+        # Prefer the just-saved session fields even if an empty .env was loaded.
+        self.settings = Settings(
+            authorization=session.authorization,
+            user_id=session.user_id,
+            device_id=session.device_id,
+            device_token=session.device_token,
+            api_base=self.settings.api_base,
+            origin=self.settings.origin,
+            app_version=self.settings.app_version,
+            pwa_version=self.settings.pwa_version,
+            platform=session.platform or self.settings.platform,
+            device_name=session.device_name or self.settings.device_name,
+            stream_quality=self.settings.stream_quality,
+            player=self.settings.player,
+            auth_source="session",
+        )
+        try:
+            self.client.close()
+        except Exception:  # noqa: BLE001
+            pass
+        self.client = MelodifyClient(self.settings)
+        # Replace login screen with the main UI.
+        self.pop_screen()
+        self.push_screen(SearchScreen())
+        self._start_os_media()
+        self.notify(
+            f"Logged in as {session.full_name or session.user_id}",
+            timeout=4,
+        )
 
     def on_unmount(self) -> None:
         self._expect_playback = False
