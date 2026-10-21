@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import sys
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from getpass import getpass
@@ -31,7 +32,9 @@ from .session import (
 _PERSIAN_DIGITS = str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789")
 
 class AuthError(RuntimeError):
-    pass
+    def __init__(self, message: str, *, status_code: int | None = None):
+        super().__init__(message)
+        self.status_code = status_code
 
 
 @dataclass
@@ -128,6 +131,7 @@ class AuthClient:
         authorization: str = "",
         user_id: str = "",
         device_token: str = "",
+        retries: int = 1,
     ) -> dict[str, Any]:
         headers = {
             "authorization": authorization,
@@ -136,35 +140,58 @@ class AuthClient:
             "device-id": self.device.device_id,
             "device-name": self.device.device_name,
         }
-        try:
-            response = self._client.post(path, json=json, headers=headers)
-        except httpx.TimeoutException as exc:
-            raise AuthError("Melodify timed out — try again.") from exc
-        except httpx.HTTPError as exc:
-            raise AuthError(f"Network error: {exc}") from exc
+        last_error: AuthError | None = None
+        attempts = max(1, retries)
+        for attempt in range(1, attempts + 1):
+            try:
+                response = self._client.post(path, json=json, headers=headers)
+            except httpx.TimeoutException as exc:
+                last_error = AuthError("Melodify timed out — try again.")
+                if attempt < attempts:
+                    time.sleep(0.6 * attempt)
+                    continue
+                raise last_error from exc
+            except httpx.HTTPError as exc:
+                raise AuthError(f"Network error: {exc}") from exc
 
-        try:
-            payload = response.json()
-        except ValueError:
-            payload = {"message": response.text[:300]}
+            try:
+                payload = response.json()
+            except ValueError:
+                payload = {"message": (response.text or "")[:300]}
 
-        if response.status_code == 406:
-            raise AuthError(
-                "Session/device rejected (406). Run `melodify login` again."
-            )
-        if response.status_code >= 400:
-            raise AuthError(
-                f"HTTP {response.status_code}: {_api_error_message(payload)}"
-            )
-        if isinstance(payload, dict) and payload.get("done") is False:
-            raise AuthError(_api_error_message(payload))
-        if not isinstance(payload, dict):
-            raise AuthError("Unexpected API response.")
-        return payload
+            if response.status_code in (502, 503, 504):
+                last_error = AuthError(
+                    f"Melodify SMS temporarily unavailable ({response.status_code}). "
+                    "Try again.",
+                    status_code=response.status_code,
+                )
+                if attempt < attempts:
+                    time.sleep(0.7 * attempt)
+                    continue
+                raise last_error
+
+            if response.status_code == 406:
+                raise AuthError(
+                    "Session/device rejected (406). Run `melodify login` again.",
+                    status_code=406,
+                )
+            if response.status_code >= 400:
+                raise AuthError(
+                    f"HTTP {response.status_code}: {_api_error_message(payload)}",
+                    status_code=response.status_code,
+                )
+            if isinstance(payload, dict) and payload.get("done") is False:
+                raise AuthError(_api_error_message(payload))
+            if not isinstance(payload, dict):
+                raise AuthError("Unexpected API response.")
+            return payload
+
+        raise last_error or AuthError("Request failed.")
 
     def request_otp(self, phone: str) -> str:
         phone = normalize_phone(phone)
-        payload = self._post("/getSms", {"phone": phone})
+        # Melodify/nginx occasionally 502s on SMS — retry a couple times.
+        payload = self._post("/getSms", {"phone": phone}, retries=3)
         result = payload.get("result")
         if isinstance(result, str) and result.strip():
             return result

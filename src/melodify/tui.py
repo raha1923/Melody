@@ -998,12 +998,16 @@ class LoginScreen(Screen):
                 msg = client.request_otp(phone)
             self._phone = phone
             self._awaiting_code = True
-            self.call_from_thread(self._set_status, f"{msg}\nPhone: {phone}")
-            self.call_from_thread(self.query_one("#login-code", Input).focus)
+            _call_ui(self, self._set_status, f"{msg}\nPhone: {phone}")
+            _call_ui(self, self.query_one("#login-code", Input).focus)
         except AuthError as exc:
-            self.call_from_thread(self._set_status, f"Send failed: {exc}")
+            _call_ui(self, self._set_status, str(exc))
         except Exception as exc:  # noqa: BLE001
-            self.call_from_thread(self._set_status, f"Send failed: {exc}")
+            _call_ui(
+                self,
+                self._set_status,
+                f"Could not send SMS ({exc}). Try again.",
+            )
 
     def _verify(self) -> None:
         phone_raw = self.query_one("#login-phone", Input).value.strip()
@@ -1019,11 +1023,15 @@ class LoginScreen(Screen):
     def _verify_worker(self, phone: str, code: str, name: str | None) -> None:
         try:
             session = complete_login(phone=phone, code=code, full_name=name)
-            self.call_from_thread(self.app.apply_session, session)
+            _call_ui(self, self.app.apply_session, session)
         except AuthError as exc:
-            self.call_from_thread(self._set_status, f"Login failed: {exc}")
+            _call_ui(self, self._set_status, str(exc))
         except Exception as exc:  # noqa: BLE001
-            self.call_from_thread(self._set_status, f"Login failed: {exc}")
+            _call_ui(
+                self,
+                self._set_status,
+                f"Login failed ({exc}). Try again.",
+            )
 
 
 class MelodifyApp(App[None]):
