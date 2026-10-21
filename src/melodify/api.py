@@ -98,7 +98,12 @@ class MelodifyClient:
 
             if response.status_code in (401, 403):
                 raise MelodifyAPIError(
-                    "Auth rejected. Check MELODIFY_AUTHORIZATION / device headers in .env.",
+                    "Auth rejected. Run `melodify login` (or refresh legacy .env tokens).",
+                    status_code=response.status_code,
+                )
+            if response.status_code == 406:
+                raise MelodifyAPIError(
+                    "Session/device rejected (406). Run `melodify login` again.",
                     status_code=response.status_code,
                 )
             if response.status_code >= 400:

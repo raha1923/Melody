@@ -3,6 +3,13 @@
 Copy this into the GitHub/Origin release body (or keep it updated before tagging).
 The release workflow attaches `dist/*.whl` and `dist/*.tar.gz` when a `v*` tag is pushed on GitHub.
 
+## v0.3.0
+
+### Features
+
+- **`melodify login`** — phone + SMS OTP (same as desktop.melodify.app). Persists `session.json` (0600) under the OS data dir. Also `logout` / `whoami`.
+- TUI shows a login screen when unauthenticated. `.env` tokens remain optional overrides.
+
 ## v0.2.1
 
 ### Fixes

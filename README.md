@@ -8,7 +8,7 @@ This is not a web app — no local HTTP server is started.
 
 - Python 3.10+
 - `mpv` (preferred) or `ffmpeg`/`ffplay`
-- A Melodify session token + device headers (see Configure)
+- A Melodify account (phone + SMS login)
 
 ### Ubuntu
 
@@ -112,46 +112,59 @@ Data files live under:
 
 On macOS, if you previously used the Linux-style `~/.local/share/melodify/` path, files are copied into Application Support on first use.
 
-## Configure
+## Login (recommended)
 
-Copy the example env file and fill in values from your Melodify desktop/PWA session:
+No need to copy tokens between machines. Melodify uses the same **phone + SMS** flow as [desktop.melodify.app](https://desktop.melodify.app):
 
 ```bash
-cp .env.example .env
+melodify login
+# Phone (09xxxxxxxxx): …
+# SMS code: …
+
+melodify whoami
+melodify          # or: melodify tui
 ```
 
-Required variables:
+Session is stored at:
+
+| OS | File |
+|---|---|
+| Linux | `~/.local/share/melodify/session.json` (mode `0600`) |
+| macOS | `~/Library/Application Support/melodify/session.json` |
+
+A per-install `device.json` (device-id) is created automatically — new logins do not reuse a shared sample device forever.
+
+```bash
+melodify logout          # deletes session.json (keeps device.json)
+```
+
+If the TUI is started with no session, it shows an in-app login form (same OTP flow).
+
+### Legacy `.env` (optional)
+
+Environment variables still work and **override** the session file when set (compat for older setups):
+
+```bash
+cp .env.example .env   # optional
+```
 
 | Variable | Description |
 |---|---|
-| `MELODIFY_AUTHORIZATION` | Session / download token (`authorization` header) |
-| `MELODIFY_USER_ID` | Numeric user id (`user-id` / `melodify_token`) |
+| `MELODIFY_AUTHORIZATION` | Session / download token |
+| `MELODIFY_USER_ID` | Numeric user id |
 | `MELODIFY_DEVICE_ID` | Device id header |
 | `MELODIFY_DEVICE_TOKEN` | Device token UUID |
 
-Optional:
+Optional overrides: `MELODIFY_API_BASE`, `MELODIFY_APP_VERSION`, `MELODIFY_PWA_VERSION`, `MELODIFY_PLATFORM`, `MELODIFY_DEVICE_NAME`, `MELODIFY_STREAM_QUALITY`, `MELODIFY_PLAYER`, `MELODIFY_MPRIS`, `MELODIFY_NOWPLAYING`.
 
-| Variable | Default |
-|---|---|
-| `MELODIFY_API_BASE` | `https://melodify.pw/api/desktop/v9` |
-| `MELODIFY_APP_VERSION` | `9.1.3` |
-| `MELODIFY_PWA_VERSION` | `9.2.6 Desktop` |
-| `MELODIFY_PLATFORM` | `Linux-Desktop` or `Mac-Desktop` (auto) |
-| `MELODIFY_STREAM_QUALITY` | `320` |
-| `MELODIFY_PLAYER` | `mpv` |
-| `MELODIFY_MPRIS` | `1` (Linux; set `0` to disable MPRIS) |
-| `MELODIFY_NOWPLAYING` | `1` (macOS; set `0` to disable Now Playing) |
-
-**Never commit `.env`.** Tokens grant access to your Melodify account.
+**Never commit `.env` or `session.json`.**
 
 ## Run
 
-Interactive TUI:
-
 ```bash
-melodify
-# or
-melodify tui
+melodify login            # once per machine
+melodify                  # interactive TUI
+melodify whoami
 ```
 
 CLI helpers:
@@ -320,8 +333,8 @@ See internal notes (agent store) for reverse-engineering details.
 
 ## Troubleshooting
 
-- **Missing env vars** — copy `.env.example` → `.env` and fill all four required keys.
-- **Auth rejected (401/403)** — refresh the token from a logged-in desktop.melodify.app session.
+- **Not logged in** — run `melodify login` (or use the TUI login form). Legacy: `.env` tokens.
+- **Auth rejected (401/403/406)** — `melodify logout` then `melodify login` again.
 - **502 / timeouts** — Melodify’s API is occasionally flaky; retry.
 - **No sound** — confirm `mpv` works (`mpv --version`) and your session has stream rights for the track.
 - **Next track waits ~30s** — fixed in 0.2.0 (EOF via mpv `eof-reached`, not process exit). Upgrade the wheel or pull latest.
