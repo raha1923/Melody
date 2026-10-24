@@ -3,6 +3,21 @@
 Copy this into the GitHub/Origin release body (or keep it updated before tagging).
 The release workflow attaches `dist/*.whl` and `dist/*.tar.gz` when a `v*` tag is pushed on GitHub.
 
+## v0.4.0
+
+### Features
+
+- **Listening device** — when Melodify rejects playback because another session is active, playback stops and one prompt offers “Listen on this device” (this install becomes the listener) or “Manage devices”.
+- **`melodify devices`** — list sessions, remove one (`--remove`), or make this install the listener (`--use-this`, `--yes` to skip the prompt).
+- **Logout in the player** — TUI key `x` and the home Log out button clear the local session and return to login.
+
+### Install
+
+```bash
+pipx install "https://github.com/raha1923/Melody/releases/download/v0.4.0/melodify-0.4.0-py3-none-any.whl"
+melodify login
+```
+
 ## v0.3.0
 
 ### Features
@@ -35,14 +50,14 @@ melodify login
 
 **Ubuntu / macOS (pipx from a release wheel):**
 
-Prefer the **v0.3.0** install one-liner above (repo: [raha1923/Melody](https://github.com/raha1923/Melody)).
+Prefer the **v0.4.0** install one-liner above (repo: [raha1923/Melody](https://github.com/raha1923/Melody)).
 
 Still need `mpv`. On Ubuntu for MPRIS: apt `python3-gi` + `gir1.2-glib-2.0`, then `pipx inject` as in the README. On macOS for Now Playing: `pipx inject melodify 'pyobjc-framework-MediaPlayer>=10'`.
 
 ### Packaging
 
 - `scripts/build-release.sh` — local sdist/wheel build (optional version bump arg)
-- `.github/workflows/release.yml` — tag `v0.3.0` → GitHub Release + artifacts
+- `.github/workflows/release.yml` — tag `v0.4.0` → GitHub Release + artifacts
 
 ---
 

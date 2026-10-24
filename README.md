@@ -36,7 +36,7 @@ sudo apt update
 sudo apt install -y mpv pipx python3-gi gir1.2-glib-2.0
 pipx ensurepath
 
-pipx install "https://github.com/raha1923/Melody/releases/download/v0.3.0/melodify-0.3.0-py3-none-any.whl"
+pipx install "https://github.com/raha1923/Melody/releases/download/v0.4.0/melodify-0.4.0-py3-none-any.whl"
 
 # Optional MPRIS (GNOME/KDE media keys) — inject into the pipx env:
 pipx inject melodify StrEnum 'emoji>=2.8,<3' 'pydbus>=0.6,<0.7' 'unidecode>=1.3,<2'
@@ -46,7 +46,7 @@ melodify login
 melodify doctor
 ```
 
-Or download the `.whl` from the release assets and run `pipx install ./melodify-0.3.0-py3-none-any.whl`.
+Or download the `.whl` from the release assets and run `pipx install ./melodify-0.4.0-py3-none-any.whl`.
 
 ### macOS
 
@@ -54,7 +54,7 @@ Or download the `.whl` from the release assets and run `pipx install ./melodify-
 brew install mpv pipx
 pipx ensurepath
 
-pipx install "https://github.com/raha1923/Melody/releases/download/v0.3.0/melodify-0.3.0-py3-none-any.whl"
+pipx install "https://github.com/raha1923/Melody/releases/download/v0.4.0/melodify-0.4.0-py3-none-any.whl"
 
 # Optional Now Playing / media keys:
 pipx inject melodify 'pyobjc-framework-MediaPlayer>=10'
@@ -344,7 +344,7 @@ See internal notes (agent store) for reverse-engineering details.
 | `.github/workflows/release.yml` | On tag `v*`, build artifacts and attach them to a GitHub Release |
 | `docs/RELEASE_NOTES.md` | User-facing notes template + checklist |
 
-**Tag a release (GitHub):** bump version → commit → `git tag v0.3.0 && git push github v0.3.0`. CI (`.github/workflows/release.yml`) attaches the wheel/sdist, or run `gh release create v0.3.0 dist/*`.
+**Tag a release (GitHub):** bump version → commit → `git tag v0.4.0 && git push github v0.4.0`. CI (`.github/workflows/release.yml`) attaches the wheel/sdist, or run `gh release create v0.4.0 dist/*`.
 
 **Origin:** Origin-native release file attach can be limited. Preferred path is GitHub Releases (above) or run `./scripts/build-release.sh` and upload `dist/*.whl` / `dist/*.tar.gz` to whatever release UI your forge provides. See `docs/RELEASE_NOTES.md`.
 
