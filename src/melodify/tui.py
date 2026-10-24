@@ -5,12 +5,14 @@ from collections.abc import Callable
 from functools import partial
 from typing import Any
 
+from dataclasses import replace
+
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.message import Message
 from textual.reactive import reactive
-from textual.screen import Screen
+from textual.screen import ModalScreen, Screen
 from textual.widget import Widget
 from textual.widgets import (
     Button,
@@ -27,11 +29,11 @@ from textual.widgets import (
     TabPane,
 )
 
-from .api import MelodifyAPIError, MelodifyClient
+from .api import InactiveSessionError, MelodifyAPIError, MelodifyClient
 from .auth import AuthClient, AuthError, complete_login, normalize_phone
 from .config import Settings, load_settings
 from .history import resolve_listening_history
-from .models import Album, Artist, ListeningHistory, Track
+from .models import Album, Artist, DeviceSession, DeviceSessions, ListeningHistory, Track
 from .mpris_bridge import MprisActions
 from .os_media import create_media_bridge
 from .paths import data_dir
@@ -40,7 +42,7 @@ from .player import PlayerError, StreamPlayer
 from .progress import ProgressStore
 from .queue import PlayQueue
 from .recent import RecentStore
-from .session import load_or_create_device, session_path
+from .session import clear_session, load_or_create_device, session_path
 
 
 def _fmt_time(seconds: float | None) -> str:
@@ -461,6 +463,8 @@ class SearchScreen(Screen):
                     yield Button("Continue", id="btn-continue", variant="primary")
                     yield Button("Last played", id="btn-last", variant="default")
                     yield Button("Load more", id="btn-load-more", variant="default")
+                    yield Button("Devices", id="btn-devices", variant="default")
+                    yield Button("Log out", id="btn-logout", variant="warning")
                 yield Static(self.status_text, id="status")
                 yield LoadingIndicator(id="loading")
                 with TabbedContent(id="results-tabs"):
@@ -493,6 +497,14 @@ class SearchScreen(Screen):
             app = self.app
             assert isinstance(app, MelodifyApp)
             app.action_load_more()
+        elif event.button.id == "btn-devices":
+            app = self.app
+            assert isinstance(app, MelodifyApp)
+            app.action_show_devices()
+        elif event.button.id == "btn-logout":
+            app = self.app
+            assert isinstance(app, MelodifyApp)
+            app.action_logout()
 
     def action_continue_listening(self) -> None:
         app = self.app
@@ -538,6 +550,10 @@ class SearchScreen(Screen):
         try:
             history = resolve_listening_history(app.client, app.recent)
         except MelodifyAPIError as exc:
+            if app.note_api_error(exc):
+                if not silent:
+                    _call_ui(self, self.set_loading, False, str(exc))
+                return
             # Local list may still be usable even if online fallback fails.
             local = app.recent.list_tracks()
             if local:
@@ -615,6 +631,9 @@ class SearchScreen(Screen):
         try:
             results = app.client.search(query)
         except MelodifyAPIError as exc:
+            if app.note_api_error(exc):
+                _call_ui(self, self.set_loading, False, str(exc))
+                return
             _call_ui(self, self.set_loading, False, f"Search failed: {exc}")
             return
         except Exception as exc:  # noqa: BLE001
@@ -749,6 +768,9 @@ class ArtistScreen(Screen):
             )
             albums, albums_end = app.client.get_artist_albums(artist_id, offset=0)
         except MelodifyAPIError as exc:
+            if app.note_api_error(exc):
+                _call_ui(self, self._set_status, str(exc), loading=False)
+                return
             _call_ui(self, self._set_status, f"Could not load artist: {exc}", loading=False)
             return
 
@@ -851,6 +873,9 @@ class AlbumScreen(Screen):
         try:
             tracks, tracks_end = app.client.get_album_tracks(album_id, offset=0)
         except MelodifyAPIError as exc:
+            if app.note_api_error(exc):
+                _call_ui(self, self._set_status, str(exc), loading=False)
+                return
             _call_ui(self, self._set_status, f"Could not load album: {exc}", loading=False)
             return
 
@@ -1037,6 +1062,331 @@ class LoginScreen(Screen):
             )
 
 
+class InactiveSessionPrompt(ModalScreen[str]):
+    """Shown once when Melodify rejects playback because another device is active.
+
+    Dismisses ``listen``, ``devices``, or ``dismiss``.
+    """
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel", show=False, priority=True),
+    ]
+
+    DEFAULT_CSS = """
+    InactiveSessionPrompt {
+        align: center middle;
+    }
+    #inactive-box {
+        width: 72;
+        max-width: 92%;
+        height: auto;
+        border: tall #334155;
+        background: #111827;
+        padding: 1 2;
+    }
+    #inactive-title {
+        text-style: bold;
+        color: #fde68a;
+        margin-bottom: 1;
+    }
+    #inactive-text, #inactive-help {
+        margin-bottom: 1;
+    }
+    #inactive-help {
+        color: #94a3b8;
+    }
+    #inactive-actions {
+        height: auto;
+    }
+    """
+
+    def __init__(self, message: str) -> None:
+        super().__init__()
+        self.message = message.strip() or (
+            "Another device is the active listening session."
+        )
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="inactive-box"):
+            yield Static("Another device is playing", id="inactive-title")
+            yield Static(self.message, id="inactive-text")
+            yield Static(
+                "Listen on this device to make it the active session. "
+                "Other devices will stop being the listener. "
+                "Manage devices if you want to remove just one of them.",
+                id="inactive-help",
+            )
+            with Horizontal(id="inactive-actions"):
+                yield Button(
+                    "Listen on this device",
+                    id="btn-listen-here",
+                    variant="success",
+                )
+                yield Button("Manage devices", id="btn-manage-devices")
+                yield Button("Cancel", id="btn-inactive-cancel", variant="default")
+
+    def on_mount(self) -> None:
+        self.query_one("#btn-listen-here", Button).focus()
+
+    def action_cancel(self) -> None:
+        self.dismiss("dismiss")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        button_id = event.button.id
+        if button_id == "btn-listen-here":
+            self.dismiss("listen")
+        elif button_id == "btn-manage-devices":
+            self.dismiss("devices")
+        else:
+            self.dismiss("dismiss")
+
+
+class ConfirmScreen(ModalScreen[bool]):
+    """Yes / no prompt. Dismisses True when the user confirms."""
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel", show=False, priority=True),
+    ]
+
+    DEFAULT_CSS = """
+    ConfirmScreen {
+        align: center middle;
+    }
+    #confirm-box {
+        width: 64;
+        max-width: 90%;
+        height: auto;
+        border: tall #334155;
+        background: #111827;
+        padding: 1 2;
+    }
+    #confirm-text {
+        margin-bottom: 1;
+    }
+    #confirm-actions {
+        height: 3;
+    }
+    """
+
+    def __init__(self, prompt: str) -> None:
+        super().__init__()
+        self.prompt = prompt
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="confirm-box"):
+            yield Static(self.prompt, id="confirm-text")
+            with Horizontal(id="confirm-actions"):
+                yield Button("Yes", id="confirm-yes", variant="error")
+                yield Button("No", id="confirm-no", variant="default")
+
+    def on_mount(self) -> None:
+        self.query_one("#confirm-no", Button).focus()
+
+    def action_cancel(self) -> None:
+        self.dismiss(False)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        self.dismiss(event.button.id == "confirm-yes")
+
+
+class DevicesScreen(Screen):
+    """This install plus other Melodify listening sessions."""
+
+    BINDINGS = [
+        Binding("escape", "close_devices", "Back", show=True),
+        Binding("r", "refresh_devices", "Refresh", show=True),
+    ]
+
+    DEFAULT_CSS = """
+    #device-help, #device-current, #device-status {
+        margin: 0 1;
+        height: auto;
+    }
+    #device-help {
+        color: #94a3b8;
+        margin-top: 1;
+    }
+    #device-current {
+        color: #86efac;
+        text-style: bold;
+        margin-top: 1;
+    }
+    #device-status {
+        color: #cbd5e1;
+        margin-bottom: 1;
+    }
+    #device-actions {
+        height: auto;
+        margin: 0 1 1 1;
+    }
+    #device-list {
+        height: 1fr;
+        border: tall #1e293b;
+        margin: 0 1 1 1;
+    }
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._others: list[DeviceSession] = []
+
+    def compose(self) -> ComposeResult:
+        yield Header(show_clock=False)
+        yield Static(
+            "This device plays after the other sessions are removed. "
+            "Enter removes the highlighted device.",
+            id="device-help",
+        )
+        yield Static("This device: …", id="device-current")
+        yield Static("Loading sessions…", id="device-status")
+        with Horizontal(id="device-actions"):
+            yield Button("Use this device", id="btn-use-this", variant="success")
+            yield Button("Remove", id="btn-remove-device", variant="error")
+            yield Button("Refresh", id="btn-refresh-devices", variant="default")
+            yield Button("Log out", id="btn-logout", variant="warning")
+            yield Button("Back", id="btn-devices-back", variant="default")
+        yield ListView(id="device-list")
+        yield Footer()
+
+    def on_mount(self) -> None:
+        self._reload()
+
+    def action_close_devices(self) -> None:
+        self.app.pop_screen()
+
+    def action_refresh_devices(self) -> None:
+        self._reload()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        button_id = event.button.id
+        if button_id == "btn-devices-back":
+            self.app.pop_screen()
+        elif button_id == "btn-refresh-devices":
+            self._reload()
+        elif button_id == "btn-use-this":
+            app = self.app
+            assert isinstance(app, MelodifyApp)
+            self._set_status("Making this device the listener…")
+            app.activate_this_device()
+        elif button_id == "btn-remove-device":
+            self._ask_remove_selected()
+        elif button_id == "btn-logout":
+            app = self.app
+            assert isinstance(app, MelodifyApp)
+            app.action_logout()
+
+    def on_list_view_selected(self, event: ListView.Selected) -> None:
+        event.stop()
+        if event.list_view.id != "device-list":
+            return
+        index = event.list_view.index
+        if index is None:
+            return
+        self._ask_remove_selected(index)
+
+    def _reload(self) -> None:
+        try:
+            status = self.query_one("#device-status", Static)
+        except Exception:  # noqa: BLE001 — screen may already be gone
+            return
+        status.update("Loading sessions…")
+        self.run_worker(self._load_worker, exclusive=False, thread=True)
+
+    def _load_worker(self) -> None:
+        app = self.app
+        assert isinstance(app, MelodifyApp)
+        try:
+            sessions = app.client.list_sessions()
+        except MelodifyAPIError as exc:
+            if not app.note_api_error(exc):
+                _call_ui(self, self._set_status, f"Could not load sessions: {exc}")
+            else:
+                _call_ui(self, self._set_status, str(exc))
+            return
+        except Exception as exc:  # noqa: BLE001
+            _call_ui(self, self._set_status, f"Could not load sessions: {exc}")
+            return
+        self.app.call_from_thread(self._deliver, sessions)
+
+    def _deliver(self, sessions: DeviceSessions) -> None:
+        try:
+            self.query_one("#device-current", Static)
+        except Exception:  # noqa: BLE001 — screen may already be gone
+            return
+        self.run_worker(self._show_sessions(sessions), exclusive=False)
+
+    async def _show_sessions(self, sessions: DeviceSessions) -> None:
+        self._others = list(sessions.others)
+        current = sessions.current.name if sessions.current else "This device"
+        self.query_one("#device-current", Static).update(f"This device: {current}")
+        if self._others:
+            status = (
+                f"{len(self._others)} other device(s). "
+                "Use this device removes them so playback works here."
+            )
+        else:
+            status = "No other devices. This install can play."
+        self._set_status(status)
+        view = self.query_one("#device-list", ListView)
+        await view.clear()
+        for item in self._others:
+            label = item.name
+            if item.last_activity:
+                label = f"{label}  ·  {item.last_activity}"
+            await view.append(ListItem(Label(label)))
+
+    def _set_status(self, text: str) -> None:
+        self.query_one("#device-status", Static).update(text)
+
+    def _selected_index(self) -> int | None:
+        view = self.query_one("#device-list", ListView)
+        index = view.index
+        if index is None or index < 0 or index >= len(self._others):
+            return None
+        return index
+
+    def _ask_remove_selected(self, index: int | None = None) -> None:
+        if index is None:
+            index = self._selected_index()
+        if index is None:
+            self.app.notify("Select another device first.", timeout=3)
+            return
+        session = self._others[index]
+        self.app.push_screen(
+            ConfirmScreen(f"Remove {session.name}?"),
+            partial(self._on_remove, session.device_token, session.name),
+        )
+
+    def _on_remove(self, device_token: str, name: str, confirmed: bool | None) -> None:
+        if not confirmed:
+            return
+        if not device_token:
+            self.app.notify(f"{name} has no device token.", severity="error", timeout=4)
+            return
+        self.run_worker(
+            partial(self._remove_worker, device_token),
+            exclusive=True,
+            thread=True,
+        )
+
+    def _remove_worker(self, device_token: str) -> None:
+        app = self.app
+        assert isinstance(app, MelodifyApp)
+        try:
+            app.client.remove_session(device_token)
+        except MelodifyAPIError as exc:
+            if not app.note_api_error(exc):
+                app.call_from_thread(
+                    app.notify, str(exc), severity="error", timeout=6
+                )
+            return
+        except Exception as exc:  # noqa: BLE001
+            app.call_from_thread(app.notify, str(exc), severity="error", timeout=6)
+            return
+        app.call_from_thread(app.notify, "Removed that session.", timeout=3)
+        app.call_from_thread(self._reload)
+
+
 class MelodifyApp(App[None]):
     TITLE = "Melodify"
     SUB_TITLE = "terminal player"
@@ -1121,6 +1471,8 @@ class MelodifyApp(App[None]):
         Binding("q", "quit", "Quit", priority=True),
         Binding("ctrl+c", "quit", "Quit", show=False, priority=True),
         Binding("ctrl+q", "quit", "Quit", show=False, priority=True),
+        Binding("d", "show_devices", "Devices"),
+        Binding("x", "logout", "Log out"),
         Binding("u", "toggle_up_next", "Up next"),
         Binding("p", "play_highlighted", "Play"),
         Binding("c", "continue_listening", "Continue"),
@@ -1163,6 +1515,8 @@ class MelodifyApp(App[None]):
         self._play_generation = 0
         self._last_select_id: int | None = None
         self._last_select_at = 0.0
+        # One confirmation at a time when the server rejects a second device.
+        self._inactive_prompt_open = False
 
     def on_mount(self) -> None:
         # Faster than 0.5s so EOF → next track feels immediate.
@@ -1214,6 +1568,171 @@ class MelodifyApp(App[None]):
             f"Logged in as {session.full_name or session.user_id}",
             timeout=4,
         )
+
+    def note_api_error(self, exc: BaseException) -> bool:
+        """Stop playback and ask once when another device owns the session.
+
+        Returns True when the error was handled. Safe to call from a worker thread.
+        Further inactive-session errors are ignored until the prompt is dismissed,
+        so prefetch and listen calls cannot stack dialogs.
+        """
+        if not isinstance(exc, InactiveSessionError):
+            return False
+        message = str(exc)
+
+        def run() -> None:
+            self._stop_playback_quietly()
+            if self._inactive_prompt_open or isinstance(
+                self.screen, InactiveSessionPrompt
+            ):
+                return
+            self._inactive_prompt_open = True
+            self.push_screen(
+                InactiveSessionPrompt(message),
+                self._on_inactive_choice,
+            )
+
+        try:
+            self.call_from_thread(run)
+        except RuntimeError:
+            run()
+        return True
+
+    def _on_inactive_choice(self, choice: str | None) -> None:
+        self._inactive_prompt_open = False
+        # dismiss() invokes this callback before it pops the prompt. Defer so
+        # "Manage devices" is pushed onto the screen underneath, not the prompt.
+        self.call_later(partial(self._follow_inactive_choice, choice))
+
+    def _follow_inactive_choice(self, choice: str | None) -> None:
+        if choice == "listen":
+            self.activate_this_device()
+        elif choice == "devices":
+            self.action_show_devices()
+
+    def activate_this_device(self) -> None:
+        """Drop every other session so this install becomes the listener."""
+        self.run_worker(self._activate_this_device_worker, exclusive=True, thread=True)
+
+    def _activate_this_device_worker(self) -> None:
+        try:
+            self.client.remove_other_sessions()
+        except MelodifyAPIError as exc:
+            self.call_from_thread(
+                self.notify,
+                f"Could not switch to this device: {exc}",
+                severity="error",
+                timeout=6,
+            )
+            return
+        except Exception as exc:  # noqa: BLE001
+            self.call_from_thread(
+                self.notify,
+                f"Could not switch to this device: {exc}",
+                severity="error",
+                timeout=6,
+            )
+            return
+
+        def done() -> None:
+            self.notify("This device is now the listening session.", timeout=4)
+            if isinstance(self.screen, DevicesScreen):
+                self.pop_screen()
+
+        self.call_from_thread(done)
+
+    def _stop_playback_quietly(self) -> None:
+        """Halt audio and queue advance without extra notices."""
+        self._expect_playback = False
+        self._play_generation += 1
+        self._saw_alive = False
+        position: float | None = None
+        try:
+            position = self.player.stop()
+        except Exception:  # noqa: BLE001
+            position = None
+        if self._last_track is not None and position is not None:
+            self.progress.save_position(
+                self._last_track.id,
+                position,
+                title=self._last_track.title,
+                mark_last=True,
+            )
+            self.recent.upsert(self._last_track, position_seconds=position)
+        try:
+            self.refresh_player_chrome()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            self.media.notify(playpause=True, ended=True)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def action_show_devices(self) -> None:
+        if isinstance(self.screen, LoginScreen):
+            self.notify("Log in first.", severity="warning", timeout=4)
+            return
+        if not self.settings.authenticated:
+            self.notify("Log in first.", severity="warning", timeout=4)
+            return
+        if isinstance(self.screen, DevicesScreen):
+            self.screen.action_refresh_devices()
+            return
+        self.push_screen(DevicesScreen())
+
+    def action_logout(self) -> None:
+        if isinstance(self.screen, LoginScreen):
+            return
+        if isinstance(self.screen, ConfirmScreen):
+            return
+        self.push_screen(
+            ConfirmScreen("Log out and return to the login screen?"),
+            self._on_logout_confirmed,
+        )
+
+    def _on_logout_confirmed(self, confirmed: bool | None) -> None:
+        if not confirmed:
+            return
+        self._expect_playback = False
+        self._play_generation += 1
+        try:
+            self.player.stop()
+        except Exception:  # noqa: BLE001
+            pass
+        self.media.stop()
+        self.queue = PlayQueue()
+        self._last_track = None
+        env_override = self.settings.auth_source.startswith("env")
+        clear_session()
+        self.settings = replace(
+            self.settings,
+            authorization="",
+            user_id="",
+            device_token="",
+            auth_source="none",
+        )
+        try:
+            self.client.close()
+        except Exception:  # noqa: BLE001
+            pass
+        self.client = MelodifyClient(self.settings)
+        self.run_worker(self._return_to_login(env_override), exclusive=True)
+
+    async def _return_to_login(self, env_override: bool) -> None:
+        # The stack is [default screen, ...pushed screens]. Leave the default
+        # screen in place — switch_screen cannot replace it — and show login.
+        while len(self.screen_stack) > 1:
+            await self.pop_screen()
+        await self.push_screen(LoginScreen())
+        if env_override:
+            self.notify(
+                "Session file cleared, but MELODIFY_* env vars still override. "
+                "Unset them or remove .env to fully sign out.",
+                severity="warning",
+                timeout=8,
+            )
+        else:
+            self.notify("Logged out.", timeout=4)
 
     def on_unmount(self) -> None:
         self._expect_playback = False
@@ -1443,6 +1962,8 @@ class MelodifyApp(App[None]):
         try:
             pager.prefetch_until(cap=PREFETCH_CAP, on_progress=on_progress)
         except MelodifyAPIError as exc:
+            if self.note_api_error(exc):
+                return
             self.call_from_thread(
                 self.notify,
                 f"Prefetch stopped: {exc}",
@@ -1511,6 +2032,8 @@ class MelodifyApp(App[None]):
             added = pager.load_more()
         except MelodifyAPIError as exc:
             lv._pending_load = False
+            if self.note_api_error(exc):
+                return
             self.call_from_thread(
                 self.notify,
                 f"Load more failed: {exc}",
@@ -1850,6 +2373,8 @@ class MelodifyApp(App[None]):
         try:
             history = resolve_listening_history(self.client, self.recent)
         except MelodifyAPIError as exc:
+            if self.note_api_error(exc):
+                return
             local = self.recent.list_tracks()
             if local:
                 history = ListeningHistory(
@@ -1981,6 +2506,8 @@ class MelodifyApp(App[None]):
                 return
             self._expect_playback = False
             self._saw_alive = False
+            if isinstance(exc, InactiveSessionError) and self.note_api_error(exc):
+                return
             self.call_from_thread(
                 self.notify,
                 f"Play failed: {exc}",
@@ -1991,6 +2518,9 @@ class MelodifyApp(App[None]):
         # Fire-and-forget listen accounting (slow/hanging API must not re-enter play).
         try:
             self.client.record_listen(track)
+        except InactiveSessionError as exc:
+            if not _stale():
+                self.note_api_error(exc)
         except Exception:  # noqa: BLE001
             pass
         if _stale():

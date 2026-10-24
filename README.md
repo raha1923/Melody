@@ -137,9 +137,19 @@ A per-install `device.json` (device-id) is created automatically — new logins 
 
 ```bash
 melodify logout          # deletes session.json (keeps device.json)
+melodify devices         # this device + other listening sessions
+melodify devices --use-this   # drop other sessions so this install can play
 ```
 
-If the TUI is started with no session, it shows an in-app login form (same OTP flow).
+If the TUI is started with no session, it shows an in-app login form (same OTP flow). In the player, **Log out** or `x` clears the session file and returns to that form. **Devices** or `d` lists sessions (`x` / `d` apply when a list is focused, not while typing in search). `MELODIFY_*` variables in `.env` still override the file after logout — unset them to fully sign out.
+
+Melodify allows one listening device at a time. When another phone or browser is the active session, playback stops and the player asks you to listen on this device (that removes the other sessions) or to open the device list. From the shell:
+
+```bash
+melodify devices --remove <device_token>   # drop one other session
+melodify devices --use-this                 # drop every other session (asks first)
+melodify devices --use-this --yes           # same, without the prompt
+```
 
 ### Legacy `.env` (optional)
 
@@ -166,6 +176,7 @@ Optional overrides: `MELODIFY_API_BASE`, `MELODIFY_APP_VERSION`, `MELODIFY_PWA_V
 melodify login            # once per machine
 melodify                  # interactive TUI
 melodify whoami
+melodify devices          # active listening device
 ```
 
 CLI helpers:
@@ -226,6 +237,8 @@ Progress/time refresh from mpv IPC ~5×/sec. The **Up next** panel is compact by
 | Shift+`←` / `→` | Seek −10s / +10s |
 | `-` / `=` | Volume down / up |
 | `s` | Stop playback |
+| `d` | Listening devices — use this device, or remove another |
+| `x` | Log out (clears the session file, returns to login) |
 | Backspace | Go back |
 | `q` | Quit |
 
@@ -313,6 +326,9 @@ Base: `https://melodify.pw/api/desktop/v9`
 - `POST /getArtistAlbums` — `{artist_id, offset}`
 - `POST /getAlbumTracks` — `{album_id, offset}`
 - `POST /listens` — record a listen `{track_id, is_demo}`
+- `POST /getAllSessions` — this device (`my_session`) and `other_sessions`
+- `POST /removeSingleSession` — drop one other session `{device_token}`
+- `POST /removeAllSessions` — drop every other session so this install can play
 - `POST /getUserMostListenedTracks` — online listening history
 - `POST /getPlaylistTracksByType` — e.g. `type=recently_listened` / `most_listened`
 - Play: `GET https://cdn.melodify.pw/handle/v2/tracks/{hash}/{quality}/{device-token}?…`
@@ -335,7 +351,8 @@ See internal notes (agent store) for reverse-engineering details.
 ## Troubleshooting
 
 - **Not logged in** — run `melodify login` (or use the TUI login form). Legacy: `.env` tokens.
-- **Auth rejected (401/403/406)** — `melodify logout` then `melodify login` again.
+- **Another device is playing** — playback stops and the TUI asks you to **Listen on this device** (makes this install the listener) or **Manage devices**. From the shell: `melodify devices --use-this`.
+- **Auth rejected (401/403/406)** — `melodify logout` then `melodify login` again. A 406 whose message is `inactive_session` is the device switch above, not a bad login.
 - **502 / timeouts** — Melodify’s API is occasionally flaky; retry.
 - **No sound** — confirm `mpv` works (`mpv --version`) and your session has stream rights for the track.
 - **Next track waits ~30s** — fixed in 0.2.0 (EOF via mpv `eof-reached`, not process exit). Upgrade the wheel or pull latest.

@@ -4,10 +4,10 @@ import argparse
 import sys
 
 from . import __version__
-from .api import MelodifyAPIError, MelodifyClient
+from .api import InactiveSessionError, MelodifyAPIError, MelodifyClient
 from .auth import AuthError, interactive_login
 from .config import load_settings
-from .models import Track
+from .models import DeviceSessions, Track
 from .controls import interactive_playback_loop
 from .history import resolve_listening_history
 from .mpris_bridge import build_direct_actions
@@ -53,6 +53,27 @@ def main(argv: list[str] | None = None) -> int:
     )
     sub.add_parser("logout", help="Clear the saved Melodify session.")
     sub.add_parser("whoami", help="Show the active session (env or session file).")
+
+    p_devices = sub.add_parser(
+        "devices",
+        help="List listening sessions, or make this install the one that can play.",
+    )
+    p_devices.add_argument(
+        "--remove",
+        metavar="DEVICE_TOKEN",
+        default=None,
+        help="Remove one other session by its device token.",
+    )
+    p_devices.add_argument(
+        "--use-this",
+        action="store_true",
+        help="Remove every other session so this install can play music.",
+    )
+    p_devices.add_argument(
+        "--yes",
+        action="store_true",
+        help="Skip the confirmation prompt for --use-this.",
+    )
 
     p_search = sub.add_parser("search", help="One-shot search in the terminal.")
     p_search.add_argument("query", help="Search query")
@@ -187,6 +208,8 @@ def main(argv: list[str] | None = None) -> int:
 
     with MelodifyClient(settings) as client:
         try:
+            if command == "devices":
+                return _run_devices(client, args)
             if command == "search":
                 results = client.search(args.query, search_type=args.search_type)
                 _print_search(results)
@@ -310,6 +333,9 @@ def main(argv: list[str] | None = None) -> int:
                     progress=progress,
                     recent=recent,
                 )
+        except InactiveSessionError as exc:
+            _print_inactive_session(exc)
+            return 1
         except MelodifyAPIError as exc:
             print(f"API error: {exc}", file=sys.stderr)
             return 1
@@ -408,6 +434,76 @@ def _stream_queue(
         duration = current.duration or 0
         if pos is None or (duration and pos >= max(duration - 3, 1)):
             progress.clear_position(current.id)
+    return 0
+
+
+def _print_inactive_session(exc: InactiveSessionError) -> None:
+    print(str(exc), file=sys.stderr)
+    labels = " · ".join(part for part in (exc.btn_1_text, exc.btn_2_text) if part)
+    if labels:
+        print(labels, file=sys.stderr)
+    print(
+        "Another device is the active listening session.\n"
+        "  melodify devices\n"
+        "  melodify devices --use-this",
+        file=sys.stderr,
+    )
+
+
+def _print_sessions(sessions: DeviceSessions) -> None:
+    current = sessions.current
+    print(f"This device: {current.name if current else 'This device'}")
+    if not sessions.others:
+        print("Other devices: none")
+        return
+    print(f"Other devices ({len(sessions.others)}):")
+    for item in sessions.others:
+        activity = f" · last seen {item.last_activity}" if item.last_activity else ""
+        print(f"  {item.name}{activity}")
+        token = item.device_token or "(no token)"
+        print(f"    device_token: {token}")
+
+
+def _confirm_use_this(*, assume_yes: bool) -> bool | None:
+    """True to proceed, False if declined, None if a terminal confirmation is required."""
+    if assume_yes:
+        return True
+    if not sys.stdin.isatty():
+        print(
+            "Refusing to remove other devices without --yes when stdin is not a terminal.",
+            file=sys.stderr,
+        )
+        return None
+    try:
+        answer = input(
+            "Remove all other Melodify devices so this one can play? [y/N] "
+        )
+    except EOFError:
+        return False
+    return answer.strip().lower() in {"y", "yes"}
+
+
+def _run_devices(client: MelodifyClient, args: argparse.Namespace) -> int:
+    if args.remove and args.use_this:
+        print("Use either --remove or --use-this, not both.", file=sys.stderr)
+        return 2
+    if args.use_this:
+        confirmed = _confirm_use_this(assume_yes=args.yes)
+        if confirmed is None:
+            return 2
+        if not confirmed:
+            print("Cancelled.")
+            return 0
+        client.remove_other_sessions()
+        print("This install is now the listening device.")
+    elif args.remove:
+        client.remove_session(args.remove)
+        print("Removed that session.")
+    sessions = client.list_sessions()
+    _print_sessions(sessions)
+    if sessions.others and not args.use_this:
+        print("\nTo listen here: melodify devices --use-this")
+        print("To drop one other device: melodify devices --remove <device_token>")
     return 0
 
 
