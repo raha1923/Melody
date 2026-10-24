@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import json
+import re
 import time
+from html import unescape
 from typing import Any
 from urllib.parse import urlencode
 
@@ -10,17 +13,108 @@ from .config import Settings
 from .models import (
     Album,
     Artist,
+    DeviceSessions,
     ListeningHistory,
     SearchResults,
     Track,
     parse_search_result,
 )
 
+_TAG_RE = re.compile(r"<[^>]+>")
+
 
 class MelodifyAPIError(RuntimeError):
     def __init__(self, message: str, *, status_code: int | None = None):
         super().__init__(message)
         self.status_code = status_code
+
+
+class InactiveSessionError(MelodifyAPIError):
+    """This install is logged in, but another device is the listening session.
+
+    Melodify returns HTTP 406 or 490 whose ``message`` is JSON with
+    ``type: inactive_session`` (same shape the desktop PWA reads).
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        text: str = "",
+        btn_1_text: str = "",
+        btn_2_text: str = "",
+        detail: dict[str, Any] | None = None,
+    ):
+        super().__init__(message, status_code=status_code)
+        self.text = text
+        self.btn_1_text = btn_1_text
+        self.btn_2_text = btn_2_text
+        self.detail = detail or {}
+
+
+def _plain_text(value: str) -> str:
+    text = _TAG_RE.sub(" ", value)
+    text = unescape(text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _as_action_dict(item: Any) -> dict[str, Any] | None:
+    if isinstance(item, dict):
+        return item
+    if isinstance(item, str):
+        raw = item.strip()
+        if not raw:
+            return None
+        try:
+            parsed = json.loads(raw)
+        except ValueError:
+            return None
+        if isinstance(parsed, dict):
+            return parsed
+    return None
+
+
+def _auth_action_from_response(response: httpx.Response) -> dict[str, Any] | None:
+    """Parse the PWA auth-action body (``message`` is JSON text or an object)."""
+    payload: Any
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = None
+    candidates: list[Any] = []
+    if isinstance(payload, dict):
+        candidates.append(payload.get("message"))
+        candidates.append(payload)
+    elif isinstance(payload, str):
+        candidates.append(payload)
+    else:
+        text = (response.text or "").strip()
+        if text:
+            candidates.append(text)
+    for item in candidates:
+        parsed = _as_action_dict(item)
+        if isinstance(parsed, dict) and parsed.get("type"):
+            return parsed
+    return None
+
+
+def _inactive_session_error(response: httpx.Response) -> InactiveSessionError | None:
+    action = _auth_action_from_response(response)
+    if not isinstance(action, dict) or action.get("type") != "inactive_session":
+        return None
+    text = _plain_text(str(action.get("text") or ""))
+    btn_1 = str(action.get("btn_1_text") or "").strip()
+    btn_2 = str(action.get("btn_2_text") or "").strip()
+    message = text or "This device is not the active listening session."
+    return InactiveSessionError(
+        message,
+        status_code=response.status_code,
+        text=text,
+        btn_1_text=btn_1,
+        btn_2_text=btn_2,
+        detail=action,
+    )
 
 
 class MelodifyClient:
@@ -104,9 +198,17 @@ class MelodifyClient:
                     "Auth rejected. Run `melodify login` (or refresh legacy .env tokens).",
                     status_code=response.status_code,
                 )
-            if response.status_code == 406:
+            if response.status_code in (406, 490):
+                inactive = _inactive_session_error(response)
+                if inactive is not None:
+                    raise inactive
+                if response.status_code == 406:
+                    raise MelodifyAPIError(
+                        "Session/device rejected (406). Run `melodify login` again.",
+                        status_code=response.status_code,
+                    )
                 raise MelodifyAPIError(
-                    "Session/device rejected (406). Run `melodify login` again.",
+                    f"API request failed ({response.status_code}): {response.text[:200]}",
                     status_code=response.status_code,
                 )
             if response.status_code >= 400:
@@ -425,10 +527,27 @@ class MelodifyClient:
             if t is not None
         ]
 
+    def list_sessions(self) -> DeviceSessions:
+        """This device plus the other listening sessions (``POST /getAllSessions``)."""
+        payload = self._request("POST", "/getAllSessions")
+        return DeviceSessions.from_payload(payload)
+
+    def remove_session(self, device_token: str) -> None:
+        """Drop one other session so it can no longer hold playback."""
+        token = (device_token or "").strip()
+        if not token:
+            raise MelodifyAPIError("A device token is required to remove a session.")
+        self._request("POST", "/removeSingleSession", json={"device_token": token})
+
+    def remove_other_sessions(self) -> None:
+        """Drop every other session. This install becomes the listening device."""
+        self._request("POST", "/removeAllSessions")
+
     def record_listen(self, track: Track, *, is_demo: bool = False) -> None:
         """Notify Melodify that a track was listened to (same as PWA ``/listens``).
 
         Kept non-blocking for the play path: one attempt, short failure budget.
+        An inactive listening session is re-raised so the caller can switch devices.
         """
         try:
             self._request(
@@ -437,6 +556,8 @@ class MelodifyClient:
                 json={"track_id": track.id, "is_demo": is_demo},
                 retries=1,
             )
+        except InactiveSessionError:
+            raise
         except MelodifyAPIError:
             # Non-fatal: playback should still work if listen accounting fails.
             return

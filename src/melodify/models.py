@@ -253,6 +253,67 @@ def _maybe_str(value: Any) -> str | None:
 
 
 @dataclass
+class DeviceSession:
+    """One Melodify listening session from ``/getAllSessions``."""
+
+    name: str
+    device_token: str = ""
+    last_activity: str = ""
+    is_current: bool = False
+
+    @classmethod
+    def from_dict(
+        cls, data: dict[str, Any] | None, *, is_current: bool = False
+    ) -> DeviceSession | None:
+        if not isinstance(data, dict):
+            return None
+        fallback = "This device" if is_current else "Unknown device"
+        name = str(data.get("name") or "").strip() or fallback
+        return cls(
+            name=name,
+            device_token=str(data.get("device_token") or "").strip(),
+            last_activity=str(data.get("last_activity") or "").strip(),
+            is_current=is_current,
+        )
+
+    def label(self) -> str:
+        bits = [self.name]
+        if self.is_current:
+            bits.append("this device")
+        if self.last_activity:
+            bits.append(self.last_activity)
+        return " · ".join(bits)
+
+
+@dataclass
+class DeviceSessions:
+    current: DeviceSession | None = None
+    others: list[DeviceSession] = field(default_factory=list)
+
+    @classmethod
+    def from_payload(cls, payload: dict[str, Any]) -> DeviceSessions:
+        result = payload.get("result") if isinstance(payload, dict) else None
+        if not isinstance(result, dict):
+            result = {}
+        current_raw = result.get("my_session")
+        current = DeviceSession.from_dict(
+            current_raw if isinstance(current_raw, dict) else None,
+            is_current=True,
+        )
+        others: list[DeviceSession] = []
+        raw_others = result.get("other_sessions") or []
+        if isinstance(raw_others, list):
+            for item in raw_others:
+                session = DeviceSession.from_dict(
+                    item if isinstance(item, dict) else None,
+                    is_current=False,
+                )
+                if session is not None:
+                    others.append(session)
+        return cls(current=current, others=others)
+
+
+@dataclass
 class ListeningHistory:
     tracks: list[Track]
     source: str
